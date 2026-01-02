@@ -28,9 +28,10 @@ type serviceAccountResource struct {
 }
 
 type serviceAccountResourceModel struct {
-	ID          types.String `tfsdk:"id"`
-	DisplayName types.String `tfsdk:"displayname"`
-	APIToken    types.String `tfsdk:"api_token"`
+	ID             types.String `tfsdk:"id"`
+	DisplayName    types.String `tfsdk:"displayname"`
+	APIToken       types.String `tfsdk:"api_token"`
+	EntryManagedBy types.Set    `tfsdk:"entry_managed_by"`
 }
 
 func (r *serviceAccountResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -80,6 +81,13 @@ Store it securely immediately after creation.`,
 				Computed:  true,
 				Sensitive: true,
 			},
+			"entry_managed_by": schema.SetAttribute{
+				MarkdownDescription: "Set of account or group IDs that can manage this service account. " +
+					"This allows delegated administration, including API token generation. " +
+					"**Required by Kanidm.** Use fully-qualified names (e.g., `terraform-admin@idm.s8i.ca`).",
+				Required:    true,
+				ElementType: types.StringType,
+			},
 		},
 	}
 }
@@ -113,8 +121,15 @@ func (r *serviceAccountResource) Create(ctx context.Context, req resource.Create
 		"displayname": plan.DisplayName.ValueString(),
 	})
 
+	// Extract entry_managed_by (required)
+	var entryManagedBy []string
+	resp.Diagnostics.Append(plan.EntryManagedBy.ElementsAs(ctx, &entryManagedBy, false)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	// Create the service account (this also generates an initial API token)
-	sa, err := r.client.CreateServiceAccount(ctx, plan.ID.ValueString(), plan.DisplayName.ValueString())
+	sa, err := r.client.CreateServiceAccount(ctx, plan.ID.ValueString(), plan.DisplayName.ValueString(), entryManagedBy)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Creating Service Account",
@@ -127,6 +142,18 @@ func (r *serviceAccountResource) Create(ctx context.Context, req resource.Create
 	plan.ID = types.StringValue(sa.ID)
 	plan.DisplayName = types.StringValue(sa.DisplayName)
 	plan.APIToken = types.StringValue(sa.APIToken)
+
+	// Set entry_managed_by
+	if len(sa.EntryManagedBy) > 0 {
+		embySet, diags := types.SetValueFrom(ctx, types.StringType, sa.EntryManagedBy)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		plan.EntryManagedBy = embySet
+	} else {
+		plan.EntryManagedBy = types.SetNull(types.StringType)
+	}
 
 	tflog.Debug(ctx, "Service account created successfully", map[string]any{
 		"id":          plan.ID.ValueString(),
@@ -168,6 +195,19 @@ func (r *serviceAccountResource) Read(ctx context.Context, req resource.ReadRequ
 	// Update state with current values
 	state.ID = types.StringValue(sa.ID)
 	state.DisplayName = types.StringValue(sa.DisplayName)
+
+	// Set entry_managed_by
+	if len(sa.EntryManagedBy) > 0 {
+		embySet, diags := types.SetValueFrom(ctx, types.StringType, sa.EntryManagedBy)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		state.EntryManagedBy = embySet
+	} else {
+		state.EntryManagedBy = types.SetNull(types.StringType)
+	}
+
 	// API token is write-only and cannot be read back, preserve existing state value
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -186,19 +226,55 @@ func (r *serviceAccountResource) Update(ctx context.Context, req resource.Update
 		"id": plan.ID.ValueString(),
 	})
 
-	// Check if displayname has changed
-	if !plan.DisplayName.Equal(state.DisplayName) {
-		tflog.Debug(ctx, "Displayname changed, updating service account", map[string]any{
-			"id":              plan.ID.ValueString(),
-			"old_displayname": state.DisplayName.ValueString(),
-			"new_displayname": plan.DisplayName.ValueString(),
-		})
+	// Check if entry_managed_by has changed
+	var entryManagedBy []string
+	entryManagedByChanged := !plan.EntryManagedBy.Equal(state.EntryManagedBy)
+	if entryManagedByChanged {
+		if !plan.EntryManagedBy.IsNull() && !plan.EntryManagedBy.IsUnknown() {
+			resp.Diagnostics.Append(plan.EntryManagedBy.ElementsAs(ctx, &entryManagedBy, false)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+		} else {
+			entryManagedBy = []string{} // Explicitly clear if set to null
+		}
 
-		err := r.client.UpdateServiceAccount(ctx, plan.ID.ValueString(), plan.DisplayName.ValueString())
+		tflog.Debug(ctx, "EntryManagedBy changed, updating service account", map[string]any{
+			"id": plan.ID.ValueString(),
+		})
+	}
+
+	// Check if displayname has changed
+	displayNameChanged := !plan.DisplayName.Equal(state.DisplayName)
+
+	// Only call UpdateServiceAccount if something changed
+	if displayNameChanged || entryManagedByChanged {
+		if displayNameChanged {
+			tflog.Debug(ctx, "Displayname changed, updating service account", map[string]any{
+				"id":              plan.ID.ValueString(),
+				"old_displayname": state.DisplayName.ValueString(),
+				"new_displayname": plan.DisplayName.ValueString(),
+			})
+		}
+
+		// Pass nil for entryManagedBy if it hasn't changed
+		var emby []string
+		if entryManagedByChanged {
+			emby = entryManagedBy
+		} else {
+			emby = nil
+		}
+
+		err := r.client.UpdateServiceAccount(
+			ctx,
+			plan.ID.ValueString(),
+			plan.DisplayName.ValueString(),
+			emby,
+		)
 		if err != nil {
 			resp.Diagnostics.AddError(
 				"Error Updating Service Account",
-				"Could not update service account displayname: "+err.Error(),
+				"Could not update service account: "+err.Error(),
 			)
 			return
 		}
