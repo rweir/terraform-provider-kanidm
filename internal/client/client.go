@@ -169,6 +169,19 @@ func (e *Entry) GetString(key string) string {
 	return ""
 }
 
+// GetBool retrieves a boolean attribute. Kanidm encodes booleans as
+// single-element string arrays like ["true"] / ["false"]. The
+// `present` return distinguishes "attribute absent" from "attribute
+// present and false" — needed so we can decide whether to mirror the
+// value into Terraform state or leave it null.
+func (e *Entry) GetBool(key string) (value bool, present bool) {
+	s := e.GetString(key)
+	if s == "" {
+		return false, false
+	}
+	return s == "true", true
+}
+
 // GetStringSlice retrieves a string slice attribute
 func (e *Entry) GetStringSlice(key string) []string {
 	val, ok := e.Attrs[key]

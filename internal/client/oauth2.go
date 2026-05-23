@@ -15,6 +15,12 @@ type OAuth2Client struct {
 	ClientID     string // Computed
 	ClientSecret string // Only for basic/confidential clients, populated on creation
 	IsPublic     bool
+
+	// PreferShortUsername mirrors Kanidm's
+	// `oauth2_prefer_short_username` attribute. The bool itself only
+	// matters when PreferShortUsernameSet is true — see GetOAuth2Client.
+	PreferShortUsername    bool
+	PreferShortUsernameSet bool
 }
 
 // CreateOAuth2BasicClient creates a new OAuth2 basic (confidential) client
@@ -103,6 +109,8 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 		origin = origin[:len(origin)-1]
 	}
 
+	preferShort, preferShortSet := entry.GetBool("oauth2_prefer_short_username")
+
 	return &OAuth2Client{
 		Name:         clientName,
 		DisplayName:  entry.GetString("displayname"),
@@ -110,24 +118,50 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 		RedirectURIs: entry.GetStringSlice("oauth2_rs_origin"),
 		ClientID:     clientName,
 		IsPublic:     isPublic,
+
+		PreferShortUsername:    preferShort,
+		PreferShortUsernameSet: preferShortSet,
 		// Note: Client secret is never returned in GET responses
 	}, nil
 }
 
-// UpdateOAuth2Client updates an OAuth2 client
-func (c *Client) UpdateOAuth2Client(ctx context.Context, name string, displayName, origin string, redirectURIs []string) error {
+// UpdateOAuth2ClientOpts is the set of attributes that can be PATCHed
+// on an OAuth2 client. Fields whose Go zero value is "no change"
+// (DisplayName=="", Origin=="", RedirectURIs==nil) follow that
+// convention; for boolean attrs we use *bool so nil means "don't touch"
+// and an explicit &true / &false sets the value.
+type UpdateOAuth2ClientOpts struct {
+	DisplayName         string
+	Origin              string
+	RedirectURIs        []string
+	PreferShortUsername *bool
+}
+
+// UpdateOAuth2Client PATCHes the named OAuth2 client. Only attributes
+// present in opts are touched server-side, so out-of-band attributes
+// the provider doesn't yet model are preserved.
+func (c *Client) UpdateOAuth2Client(ctx context.Context, name string, opts UpdateOAuth2ClientOpts) error {
 	attrs := make(map[string]any)
 
-	if displayName != "" {
-		attrs["displayname"] = []string{displayName}
+	if opts.DisplayName != "" {
+		attrs["displayname"] = []string{opts.DisplayName}
 	}
 
-	if origin != "" {
-		attrs["oauth2_rs_origin_landing"] = []string{origin}
+	if opts.Origin != "" {
+		attrs["oauth2_rs_origin_landing"] = []string{opts.Origin}
 	}
 
-	if redirectURIs != nil {
-		attrs["oauth2_rs_origin"] = redirectURIs
+	if opts.RedirectURIs != nil {
+		attrs["oauth2_rs_origin"] = opts.RedirectURIs
+	}
+
+	if opts.PreferShortUsername != nil {
+		// Kanidm encodes single-valued boolean attrs as string arrays.
+		val := "false"
+		if *opts.PreferShortUsername {
+			val = "true"
+		}
+		attrs["oauth2_prefer_short_username"] = []string{val}
 	}
 
 	req := NewUpdateRequest(attrs)

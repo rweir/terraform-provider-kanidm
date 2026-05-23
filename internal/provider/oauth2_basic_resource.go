@@ -31,9 +31,10 @@ type oauth2BasicResourceModel struct {
 	Name         types.String `tfsdk:"name"`
 	DisplayName  types.String `tfsdk:"displayname"`
 	Origin       types.String `tfsdk:"origin"`
-	RedirectURIs types.Set    `tfsdk:"redirect_uris"`
-	ScopeMaps    types.Set    `tfsdk:"scope_map"`
-	ClientSecret types.String `tfsdk:"client_secret"`
+	RedirectURIs        types.Set    `tfsdk:"redirect_uris"`
+	ScopeMaps           types.Set    `tfsdk:"scope_map"`
+	ClientSecret        types.String `tfsdk:"client_secret"`
+	PreferShortUsername types.Bool   `tfsdk:"prefer_short_username"`
 }
 
 type scopeMapModel struct {
@@ -112,6 +113,13 @@ Store it securely immediately after creation. You can regenerate it using the Ka
 					"Store this secret securely as it cannot be retrieved later.",
 				Computed:  true,
 				Sensitive: true,
+			},
+			"prefer_short_username": schema.BoolAttribute{
+				MarkdownDescription: "If true, Kanidm emits the bare username (`name`) in the `preferred_username` " +
+					"claim instead of the full SPN (`name@domain`). Useful for OIDC clients that treat " +
+					"`preferred_username` as a single token rather than a user@host pair. " +
+					"Maps to Kanidm's `oauth2_prefer_short_username` attribute.",
+				Optional: true,
 			},
 		},
 		Blocks: map[string]schema.Block{
@@ -194,7 +202,17 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 		"redirect_count": len(redirectURIs),
 	})
 
-	if err := r.client.UpdateOAuth2Client(ctx, oauth2Client.Name, plan.DisplayName.ValueString(), plan.Origin.ValueString(), redirectURIs); err != nil {
+	updateOpts := client.UpdateOAuth2ClientOpts{
+		DisplayName:  plan.DisplayName.ValueString(),
+		Origin:       plan.Origin.ValueString(),
+		RedirectURIs: redirectURIs,
+	}
+	if !plan.PreferShortUsername.IsNull() && !plan.PreferShortUsername.IsUnknown() {
+		v := plan.PreferShortUsername.ValueBool()
+		updateOpts.PreferShortUsername = &v
+	}
+
+	if err := r.client.UpdateOAuth2Client(ctx, oauth2Client.Name, updateOpts); err != nil {
 		resp.Diagnostics.AddError(
 			"Error Setting OAuth2 Configuration",
 			"OAuth2 client was created but configuration could not be set: "+err.Error(),
@@ -259,6 +277,13 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 		plan.RedirectURIs = types.SetNull(types.StringType)
 	}
 
+	// Preserve null on prefer_short_username: if the user didn't set
+	// the attribute and the server doesn't have it set either, leave
+	// state Null rather than turning it into an explicit false.
+	if !plan.PreferShortUsername.IsNull() || createdClient.PreferShortUsernameSet {
+		plan.PreferShortUsername = types.BoolValue(createdClient.PreferShortUsername)
+	}
+
 	// Keep the scope maps from the plan (can't read them back from API in current form)
 	// In a future enhancement, we could parse the scope maps from the API response
 
@@ -312,6 +337,14 @@ func (r *oauth2BasicResource) Read(ctx context.Context, req resource.ReadRequest
 	state.Name = types.StringValue(oauth2Client.Name)
 	state.DisplayName = types.StringValue(oauth2Client.DisplayName)
 	state.Origin = types.StringValue(oauth2Client.Origin)
+
+	// Mirror prefer_short_username when the server has it set; if the
+	// server doesn't have it and state already had it Null, leave it
+	// Null (avoids introducing drift on refresh of a config that
+	// doesn't manage this attribute).
+	if !state.PreferShortUsername.IsNull() || oauth2Client.PreferShortUsernameSet {
+		state.PreferShortUsername = types.BoolValue(oauth2Client.PreferShortUsername)
+	}
 
 	if len(oauth2Client.RedirectURIs) > 0 {
 		redirectURIsSet, diags := types.SetValueFrom(ctx, types.StringType, oauth2Client.RedirectURIs)
@@ -371,14 +404,24 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 		}
 	}
 
-	// Update OAuth2 client (displayname, origin, redirect URIs)
-	if err := r.client.UpdateOAuth2Client(
-		ctx,
-		plan.Name.ValueString(),
-		plan.DisplayName.ValueString(),
-		plan.Origin.ValueString(),
-		redirectURIs,
-	); err != nil {
+	// Update OAuth2 client (displayname, origin, redirect URIs, plus
+	// any out-of-band bools the user set in the plan).
+	updateOpts := client.UpdateOAuth2ClientOpts{
+		DisplayName:  plan.DisplayName.ValueString(),
+		Origin:       plan.Origin.ValueString(),
+		RedirectURIs: redirectURIs,
+	}
+	if !plan.PreferShortUsername.IsNull() && !plan.PreferShortUsername.IsUnknown() {
+		v := plan.PreferShortUsername.ValueBool()
+		updateOpts.PreferShortUsername = &v
+	} else if !state.PreferShortUsername.IsNull() {
+		// The user has removed the attribute from the plan but it
+		// was set in state — clear it server-side.
+		v := false
+		updateOpts.PreferShortUsername = &v
+	}
+
+	if err := r.client.UpdateOAuth2Client(ctx, plan.Name.ValueString(), updateOpts); err != nil {
 		resp.Diagnostics.AddError(
 			"Error Updating OAuth2 Basic Client",
 			"Could not update OAuth2 basic client: "+err.Error(),
@@ -471,6 +514,12 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 		plan.RedirectURIs = redirectURIsSet
 	} else {
 		plan.RedirectURIs = types.SetNull(types.StringType)
+	}
+
+	// Same null-preservation logic as Create: keep Null when neither
+	// plan nor server has the attribute set.
+	if !plan.PreferShortUsername.IsNull() || updatedClient.PreferShortUsernameSet {
+		plan.PreferShortUsername = types.BoolValue(updatedClient.PreferShortUsername)
 	}
 
 	// Preserve client secret from state (cannot be read back from API)
