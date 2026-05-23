@@ -1,0 +1,23 @@
+# Acceptance-test Kanidm instance.
+#
+# Brought up by `make test-acc-up`. The bootstrap script generates certs
+# and a server config under ./data/, then this compose file starts the
+# daemon. The container's /data is the bind mount, so state lives in
+# ./data on the host — wipe it for a fresh slate.
+#
+# Listening on 127.0.0.1:8443 only — never exposes outside the box.
+
+services:
+  kanidm:
+    image: kanidm/server:latest
+    container_name: kanidm-acctest
+    ports:
+      - "127.0.0.1:8443:8443"
+    volumes:
+      - ./data:/data
+    # The kanidm image's default entrypoint runs `kanidmd server -c
+    # /data/server.toml`; we rely on that.
+    restart: "no"
+    # Readiness is checked by bootstrap.sh from the host (curl), since
+    # the kanidm/server image doesn't bundle curl/wget for an in-image
+    # healthcheck.
