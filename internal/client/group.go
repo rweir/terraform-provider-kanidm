@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"strconv"
 )
 
 // Group represents a Kanidm group
@@ -10,6 +11,11 @@ type Group struct {
 	ID          string
 	Description string
 	Members     []string
+	// Posix is true when the group has the `posixgroup` class.
+	// Kanidm assigns GidNumber automatically when the class is added;
+	// disabling is not supported by the kanidm API.
+	Posix     bool
+	GidNumber int64
 }
 
 // CreateGroup creates a new group
@@ -54,10 +60,27 @@ func (c *Client) GetGroup(ctx context.Context, id string) (*Group, error) {
 		members = []string{}
 	}
 
+	posix := false
+	for _, cls := range entry.GetStringSlice("class") {
+		if cls == "posixgroup" {
+			posix = true
+			break
+		}
+	}
+
+	var gidNumber int64
+	if s := entry.GetString("gidnumber"); s != "" {
+		if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+			gidNumber = v
+		}
+	}
+
 	return &Group{
 		ID:          entry.GetString("name"),
 		Description: entry.GetString("description"),
 		Members:     members,
+		Posix:       posix,
+		GidNumber:   gidNumber,
 	}, nil
 }
 
@@ -89,6 +112,23 @@ func (c *Client) DeleteGroup(ctx context.Context, id string) error {
 	resp, err := c.doRequest(ctx, "DELETE", "/v1/group/"+id, nil)
 	if err != nil {
 		return fmt.Errorf("delete group: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
+// EnableGroupPosix adds the `posixgroup` class to a group, which makes
+// it visible to nss/kanidm-unixd. Kanidm auto-assigns a gidnumber
+// from the entry's UUID. Idempotent — calling on an already-POSIX
+// group is a no-op.
+//
+// Kanidm does NOT support removing the class once set; there is no
+// corresponding DisableGroupPosix.
+func (c *Client) EnableGroupPosix(ctx context.Context, groupID string) error {
+	resp, err := c.doRequest(ctx, "POST", "/v1/group/"+groupID+"/_unix", struct{}{})
+	if err != nil {
+		return fmt.Errorf("enable group posix: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

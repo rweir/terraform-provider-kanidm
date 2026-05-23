@@ -31,6 +31,8 @@ type groupResourceModel struct {
 	ID          types.String `tfsdk:"id"`
 	Description types.String `tfsdk:"description"`
 	Members     types.Set    `tfsdk:"members"`
+	Posix       types.Bool   `tfsdk:"posix"`
+	GidNumber   types.Int64  `tfsdk:"gidnumber"`
 }
 
 func (r *groupResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -75,6 +77,19 @@ resource "kanidm_group" "developers" {
 					"Members are managed as a complete set - any changes will replace all members.",
 				Optional:    true,
 				ElementType: types.StringType,
+			},
+			"posix": schema.BoolAttribute{
+				MarkdownDescription: "If true, mark the group as a POSIX group (adds the `posixgroup` " +
+					"class and assigns a gidnumber). Required for groups whose membership should be " +
+					"visible via NSS/`kanidm_unixd`. " +
+					"**Kanidm doesn't support unsetting this once enabled** — flipping " +
+					"this back to false is an error.",
+				Optional: true,
+			},
+			"gidnumber": schema.Int64Attribute{
+				MarkdownDescription: "POSIX gidnumber assigned by Kanidm when `posix = true`. " +
+					"Auto-assigned from the entry's UUID; not user-settable.",
+				Computed: true,
 			},
 		},
 	}
@@ -145,6 +160,18 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 		}
 	}
 
+	// Enable POSIX if requested. Kanidm assigns the gidnumber itself.
+	if plan.Posix.ValueBool() {
+		tflog.Debug(ctx, "Enabling POSIX on group", map[string]any{"id": group.ID})
+		if err := r.client.EnableGroupPosix(ctx, group.ID); err != nil {
+			resp.Diagnostics.AddError(
+				"Error Enabling POSIX",
+				"Group was created but POSIX could not be enabled: "+err.Error(),
+			)
+			return
+		}
+	}
+
 	// Read back the created group
 	createdGroup, err := r.client.GetGroup(ctx, group.ID)
 	if err != nil {
@@ -172,6 +199,18 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 			return
 		}
 		plan.Members = membersSet
+	}
+
+	// Mirror POSIX state from the server. gidnumber is always exposed
+	// when posix is set; when posix is null in plan AND the server
+	// doesn't have it set either, leave both Null/Unknown alone.
+	if !plan.Posix.IsNull() || createdGroup.Posix {
+		plan.Posix = types.BoolValue(createdGroup.Posix)
+	}
+	if createdGroup.Posix {
+		plan.GidNumber = types.Int64Value(createdGroup.GidNumber)
+	} else {
+		plan.GidNumber = types.Int64Null()
 	}
 
 	tflog.Debug(ctx, "Group created successfully", map[string]any{
@@ -227,6 +266,17 @@ func (r *groupResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		state.Members = membersSet
 	}
 
+	// Mirror POSIX state from the server. Preserve Null when neither
+	// existing state nor server has it set.
+	if !state.Posix.IsNull() || group.Posix {
+		state.Posix = types.BoolValue(group.Posix)
+	}
+	if group.Posix {
+		state.GidNumber = types.Int64Value(group.GidNumber)
+	} else {
+		state.GidNumber = types.Int64Null()
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -258,12 +308,42 @@ func (r *groupResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		description = plan.Description.ValueString()
 	}
 
+	// POSIX transitions are checked first so a refuse-to-disable
+	// diagnostic surfaces before any other failure (e.g. an empty
+	// PATCH against UpdateGroup when nothing else changes).
+	//   - null/false -> true: POST /_unix to enable (deferred until
+	//     after UpdateGroup so creation order in state is sensible)
+	//   - true -> false: refuse; kanidm doesn't support disabling
+	//   - any -> same: no-op
+	wasPosix := state.Posix.ValueBool()
+	wantPosix := plan.Posix.ValueBool()
+	if wasPosix && !wantPosix {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("posix"),
+			"POSIX cannot be disabled",
+			"Kanidm doesn't support removing the `posixgroup` class once it has been set. "+
+				"To remove POSIX status, the group has to be destroyed and re-created.",
+		)
+		return
+	}
+
 	if err := r.client.UpdateGroup(ctx, plan.ID.ValueString(), description, memberIDs); err != nil {
 		resp.Diagnostics.AddError(
 			"Error Updating Group",
 			"Could not update group: "+err.Error(),
 		)
 		return
+	}
+
+	if !wasPosix && wantPosix {
+		tflog.Debug(ctx, "Enabling POSIX on group", map[string]any{"id": plan.ID.ValueString()})
+		if err := r.client.EnableGroupPosix(ctx, plan.ID.ValueString()); err != nil {
+			resp.Diagnostics.AddError(
+				"Error Enabling POSIX",
+				"Could not enable POSIX on group: "+err.Error(),
+			)
+			return
+		}
 	}
 
 	// Read back the updated group
@@ -288,6 +368,14 @@ func (r *groupResource) Update(ctx context.Context, req resource.UpdateRequest, 
 			return
 		}
 		plan.Members = membersSet
+	}
+	if !plan.Posix.IsNull() || updatedGroup.Posix {
+		plan.Posix = types.BoolValue(updatedGroup.Posix)
+	}
+	if updatedGroup.Posix {
+		plan.GidNumber = types.Int64Value(updatedGroup.GidNumber)
+	} else {
+		plan.GidNumber = types.Int64Null()
 	}
 
 	tflog.Debug(ctx, "Group updated successfully", map[string]any{
