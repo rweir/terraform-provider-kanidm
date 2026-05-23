@@ -31,10 +31,11 @@ type oauth2BasicResourceModel struct {
 	Name         types.String `tfsdk:"name"`
 	DisplayName  types.String `tfsdk:"displayname"`
 	Origin       types.String `tfsdk:"origin"`
-	RedirectURIs        types.Set    `tfsdk:"redirect_uris"`
-	ScopeMaps           types.Set    `tfsdk:"scope_map"`
-	ClientSecret        types.String `tfsdk:"client_secret"`
-	PreferShortUsername types.Bool   `tfsdk:"prefer_short_username"`
+	RedirectURIs             types.Set    `tfsdk:"redirect_uris"`
+	ScopeMaps                types.Set    `tfsdk:"scope_map"`
+	ClientSecret             types.String `tfsdk:"client_secret"`
+	PreferShortUsername      types.Bool   `tfsdk:"prefer_short_username"`
+	AllowInsecureDisablePKCE types.Bool   `tfsdk:"allow_insecure_client_disable_pkce"`
 }
 
 type scopeMapModel struct {
@@ -119,6 +120,13 @@ Store it securely immediately after creation. You can regenerate it using the Ka
 					"claim instead of the full SPN (`name@domain`). Useful for OIDC clients that treat " +
 					"`preferred_username` as a single token rather than a user@host pair. " +
 					"Maps to Kanidm's `oauth2_prefer_short_username` attribute.",
+				Optional: true,
+			},
+			"allow_insecure_client_disable_pkce": schema.BoolAttribute{
+				MarkdownDescription: "If true, this confidential client may complete the OAuth2 flow without sending " +
+					"a `code_challenge` (PKCE). Useful only for confidential clients that don't support " +
+					"PKCE (older Forgejo, Netbox, OpenGist). Leave unset for everything else. " +
+					"Maps to Kanidm's `oauth2_allow_insecure_client_disable_pkce` attribute.",
 				Optional: true,
 			},
 		},
@@ -211,6 +219,10 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 		v := plan.PreferShortUsername.ValueBool()
 		updateOpts.PreferShortUsername = &v
 	}
+	if !plan.AllowInsecureDisablePKCE.IsNull() && !plan.AllowInsecureDisablePKCE.IsUnknown() {
+		v := plan.AllowInsecureDisablePKCE.ValueBool()
+		updateOpts.AllowInsecureDisablePKCE = &v
+	}
 
 	if err := r.client.UpdateOAuth2Client(ctx, oauth2Client.Name, updateOpts); err != nil {
 		resp.Diagnostics.AddError(
@@ -283,6 +295,10 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 	if !plan.PreferShortUsername.IsNull() || createdClient.PreferShortUsernameSet {
 		plan.PreferShortUsername = types.BoolValue(createdClient.PreferShortUsername)
 	}
+	// Same null-preservation for allow_insecure_client_disable_pkce.
+	if !plan.AllowInsecureDisablePKCE.IsNull() || createdClient.AllowInsecureDisablePKCESet {
+		plan.AllowInsecureDisablePKCE = types.BoolValue(createdClient.AllowInsecureDisablePKCE)
+	}
 
 	// Keep the scope maps from the plan (can't read them back from API in current form)
 	// In a future enhancement, we could parse the scope maps from the API response
@@ -344,6 +360,10 @@ func (r *oauth2BasicResource) Read(ctx context.Context, req resource.ReadRequest
 	// doesn't manage this attribute).
 	if !state.PreferShortUsername.IsNull() || oauth2Client.PreferShortUsernameSet {
 		state.PreferShortUsername = types.BoolValue(oauth2Client.PreferShortUsername)
+	}
+	// Same null-preservation for allow_insecure_client_disable_pkce.
+	if !state.AllowInsecureDisablePKCE.IsNull() || oauth2Client.AllowInsecureDisablePKCESet {
+		state.AllowInsecureDisablePKCE = types.BoolValue(oauth2Client.AllowInsecureDisablePKCE)
 	}
 
 	if len(oauth2Client.RedirectURIs) > 0 {
@@ -419,6 +439,13 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 		// was set in state — clear it server-side.
 		v := false
 		updateOpts.PreferShortUsername = &v
+	}
+	if !plan.AllowInsecureDisablePKCE.IsNull() && !plan.AllowInsecureDisablePKCE.IsUnknown() {
+		v := plan.AllowInsecureDisablePKCE.ValueBool()
+		updateOpts.AllowInsecureDisablePKCE = &v
+	} else if !state.AllowInsecureDisablePKCE.IsNull() {
+		v := false
+		updateOpts.AllowInsecureDisablePKCE = &v
 	}
 
 	if err := r.client.UpdateOAuth2Client(ctx, plan.Name.ValueString(), updateOpts); err != nil {
@@ -520,6 +547,10 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 	// plan nor server has the attribute set.
 	if !plan.PreferShortUsername.IsNull() || updatedClient.PreferShortUsernameSet {
 		plan.PreferShortUsername = types.BoolValue(updatedClient.PreferShortUsername)
+	}
+	// Same for allow_insecure_client_disable_pkce.
+	if !plan.AllowInsecureDisablePKCE.IsNull() || updatedClient.AllowInsecureDisablePKCESet {
+		plan.AllowInsecureDisablePKCE = types.BoolValue(updatedClient.AllowInsecureDisablePKCE)
 	}
 
 	// Preserve client secret from state (cannot be read back from API)

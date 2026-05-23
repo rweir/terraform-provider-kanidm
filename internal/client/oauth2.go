@@ -21,6 +21,12 @@ type OAuth2Client struct {
 	// matters when PreferShortUsernameSet is true — see GetOAuth2Client.
 	PreferShortUsername    bool
 	PreferShortUsernameSet bool
+
+	// AllowInsecureDisablePKCE mirrors Kanidm's
+	// `oauth2_allow_insecure_client_disable_pkce`. Same Set-flag
+	// convention as PreferShortUsername.
+	AllowInsecureDisablePKCE    bool
+	AllowInsecureDisablePKCESet bool
 }
 
 // CreateOAuth2BasicClient creates a new OAuth2 basic (confidential) client
@@ -110,6 +116,7 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 	}
 
 	preferShort, preferShortSet := entry.GetBool("oauth2_prefer_short_username")
+	disablePKCE, disablePKCESet := entry.GetBool("oauth2_allow_insecure_client_disable_pkce")
 
 	return &OAuth2Client{
 		Name:         clientName,
@@ -121,6 +128,9 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 
 		PreferShortUsername:    preferShort,
 		PreferShortUsernameSet: preferShortSet,
+
+		AllowInsecureDisablePKCE:    disablePKCE,
+		AllowInsecureDisablePKCESet: disablePKCESet,
 		// Note: Client secret is never returned in GET responses
 	}, nil
 }
@@ -131,10 +141,11 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 // convention; for boolean attrs we use *bool so nil means "don't touch"
 // and an explicit &true / &false sets the value.
 type UpdateOAuth2ClientOpts struct {
-	DisplayName         string
-	Origin              string
-	RedirectURIs        []string
-	PreferShortUsername *bool
+	DisplayName              string
+	Origin                   string
+	RedirectURIs             []string
+	PreferShortUsername      *bool
+	AllowInsecureDisablePKCE *bool
 }
 
 // UpdateOAuth2Client PATCHes the named OAuth2 client. Only attributes
@@ -162,6 +173,16 @@ func (c *Client) UpdateOAuth2Client(ctx context.Context, name string, opts Updat
 			val = "true"
 		}
 		attrs["oauth2_prefer_short_username"] = []string{val}
+	}
+
+	if opts.AllowInsecureDisablePKCE != nil {
+		// Kanidm clears this one with an empty array (rather than
+		// `["false"]`) — see the kanidm CLI's `warning-enable-pkce`.
+		if *opts.AllowInsecureDisablePKCE {
+			attrs["oauth2_allow_insecure_client_disable_pkce"] = []string{"true"}
+		} else {
+			attrs["oauth2_allow_insecure_client_disable_pkce"] = []string{}
+		}
 	}
 
 	req := NewUpdateRequest(attrs)
