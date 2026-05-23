@@ -31,7 +31,7 @@ type oauth2BasicResourceModel struct {
 	Name         types.String `tfsdk:"name"`
 	DisplayName  types.String `tfsdk:"displayname"`
 	Origin       types.String `tfsdk:"origin"`
-	RedirectURIs types.List   `tfsdk:"redirect_uris"`
+	RedirectURIs types.Set    `tfsdk:"redirect_uris"`
 	ScopeMaps    types.Set    `tfsdk:"scope_map"`
 	ClientSecret types.String `tfsdk:"client_secret"`
 }
@@ -101,8 +101,9 @@ Store it securely immediately after creation. You can regenerate it using the Ka
 				MarkdownDescription: "Origin URL where the OAuth2 client application is hosted (e.g., https://grafana.example.com).",
 				Required:            true,
 			},
-			"redirect_uris": schema.ListAttribute{
-				MarkdownDescription: "List of allowed redirect URIs for OAuth2 callbacks.",
+			"redirect_uris": schema.SetAttribute{
+				MarkdownDescription: "Set of allowed redirect URIs for OAuth2 callbacks. " +
+					"Order is not significant — Kanidm stores these as a multi-valued attribute.",
 				Optional:            true,
 				ElementType:         types.StringType,
 			},
@@ -248,14 +249,14 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 	plan.ClientSecret = types.StringValue(oauth2Client.ClientSecret)
 
 	if len(createdClient.RedirectURIs) > 0 {
-		redirectURIsList, diags := types.ListValueFrom(ctx, types.StringType, createdClient.RedirectURIs)
+		redirectURIsSet, diags := types.SetValueFrom(ctx, types.StringType, createdClient.RedirectURIs)
 		resp.Diagnostics.Append(diags...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		plan.RedirectURIs = redirectURIsList
+		plan.RedirectURIs = redirectURIsSet
 	} else {
-		plan.RedirectURIs = types.ListNull(types.StringType)
+		plan.RedirectURIs = types.SetNull(types.StringType)
 	}
 
 	// Keep the scope maps from the plan (can't read them back from API in current form)
@@ -313,14 +314,14 @@ func (r *oauth2BasicResource) Read(ctx context.Context, req resource.ReadRequest
 	state.Origin = types.StringValue(oauth2Client.Origin)
 
 	if len(oauth2Client.RedirectURIs) > 0 {
-		redirectURIsList, diags := types.ListValueFrom(ctx, types.StringType, oauth2Client.RedirectURIs)
+		redirectURIsSet, diags := types.SetValueFrom(ctx, types.StringType, oauth2Client.RedirectURIs)
 		resp.Diagnostics.Append(diags...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		state.RedirectURIs = redirectURIsList
+		state.RedirectURIs = redirectURIsSet
 	} else {
-		state.RedirectURIs = types.ListNull(types.StringType)
+		state.RedirectURIs = types.SetNull(types.StringType)
 	}
 
 	// Retrieve client secret if not already in state (e.g., after import)
@@ -462,14 +463,14 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 	plan.Origin = types.StringValue(updatedClient.Origin)
 
 	if len(updatedClient.RedirectURIs) > 0 {
-		redirectURIsList, diags := types.ListValueFrom(ctx, types.StringType, updatedClient.RedirectURIs)
+		redirectURIsSet, diags := types.SetValueFrom(ctx, types.StringType, updatedClient.RedirectURIs)
 		resp.Diagnostics.Append(diags...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		plan.RedirectURIs = redirectURIsList
+		plan.RedirectURIs = redirectURIsSet
 	} else {
-		plan.RedirectURIs = types.ListNull(types.StringType)
+		plan.RedirectURIs = types.SetNull(types.StringType)
 	}
 
 	// Preserve client secret from state (cannot be read back from API)
