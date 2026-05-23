@@ -58,6 +58,51 @@ resource "kanidm_group" "test" {
 	})
 }
 
+// Explicit gidnumber on POSIX enable. Useful for kanidm rebuilds
+// where existing on-disk file ownership needs to be preserved.
+// Kanidm accepts a `gidnumber` field in the POST /v1/group/<name>/_unix
+// body, overriding the default auto-assignment from the entry UUID.
+//
+// The valid range for explicit GIDs is roughly 65536–524287; we
+// pick something inside it.
+func TestAccGroup_posixExplicitGid(t *testing.T) {
+	name := uniq("group-posix-gid")
+	const gid = 200042
+
+	cfg := fmt.Sprintf(`
+resource "kanidm_group" "test" {
+  id        = %q
+  posix     = true
+  gidnumber = %d
+}
+`, name, gid)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: cfg,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("kanidm_group.test", "posix", "true"),
+					resource.TestCheckResourceAttr("kanidm_group.test", "gidnumber", fmt.Sprintf("%d", gid)),
+				),
+			},
+			{
+				Config:   cfg,
+				PlanOnly: true,
+			},
+			{
+				ResourceName:                         "kanidm_group.test",
+				ImportState:                          true,
+				ImportStateVerify:                    true,
+				ImportStateId:                        name,
+				ImportStateVerifyIdentifierAttribute: "id",
+			},
+		},
+	})
+}
+
 // Kanidm doesn't support removing the POSIX class from a group once
 // it's been set. The provider should refuse the transition with a
 // clear diagnostic rather than silently failing.

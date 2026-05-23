@@ -7,6 +7,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -87,9 +88,15 @@ resource "kanidm_group" "developers" {
 				Optional: true,
 			},
 			"gidnumber": schema.Int64Attribute{
-				MarkdownDescription: "POSIX gidnumber assigned by Kanidm when `posix = true`. " +
-					"Auto-assigned from the entry's UUID; not user-settable.",
+				MarkdownDescription: "POSIX gidnumber. When omitted, Kanidm assigns one " +
+					"automatically from the entry's UUID. Set explicitly to pin a specific " +
+					"gid — useful when rebuilding a Kanidm instance and the group already owns " +
+					"files on disk. Valid explicit range is roughly 65536–524287.",
+				Optional: true,
 				Computed: true,
+				PlanModifiers: []planmodifier.Int64{
+					int64planmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -160,10 +167,19 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 		}
 	}
 
-	// Enable POSIX if requested. Kanidm assigns the gidnumber itself.
+	// Enable POSIX if requested. Pass through an explicit gidnumber if
+	// the user set one; otherwise let kanidm auto-assign.
 	if plan.Posix.ValueBool() {
-		tflog.Debug(ctx, "Enabling POSIX on group", map[string]any{"id": group.ID})
-		if err := r.client.EnableGroupPosix(ctx, group.ID); err != nil {
+		var gid *int64
+		if !plan.GidNumber.IsNull() && !plan.GidNumber.IsUnknown() {
+			v := plan.GidNumber.ValueInt64()
+			gid = &v
+		}
+		tflog.Debug(ctx, "Enabling POSIX on group", map[string]any{
+			"id":               group.ID,
+			"explicit_gid_set": gid != nil,
+		})
+		if err := r.client.EnableGroupPosix(ctx, group.ID, gid); err != nil {
 			resp.Diagnostics.AddError(
 				"Error Enabling POSIX",
 				"Group was created but POSIX could not be enabled: "+err.Error(),
@@ -336,8 +352,16 @@ func (r *groupResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 
 	if !wasPosix && wantPosix {
-		tflog.Debug(ctx, "Enabling POSIX on group", map[string]any{"id": plan.ID.ValueString()})
-		if err := r.client.EnableGroupPosix(ctx, plan.ID.ValueString()); err != nil {
+		var gid *int64
+		if !plan.GidNumber.IsNull() && !plan.GidNumber.IsUnknown() {
+			v := plan.GidNumber.ValueInt64()
+			gid = &v
+		}
+		tflog.Debug(ctx, "Enabling POSIX on group", map[string]any{
+			"id":               plan.ID.ValueString(),
+			"explicit_gid_set": gid != nil,
+		})
+		if err := r.client.EnableGroupPosix(ctx, plan.ID.ValueString(), gid); err != nil {
 			resp.Diagnostics.AddError(
 				"Error Enabling POSIX",
 				"Could not enable POSIX on group: "+err.Error(),

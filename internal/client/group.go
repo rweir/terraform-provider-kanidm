@@ -119,14 +119,22 @@ func (c *Client) DeleteGroup(ctx context.Context, id string) error {
 }
 
 // EnableGroupPosix adds the `posixgroup` class to a group, which makes
-// it visible to nss/kanidm-unixd. Kanidm auto-assigns a gidnumber
-// from the entry's UUID. Idempotent — calling on an already-POSIX
-// group is a no-op.
+// it visible to nss/kanidm-unixd. If `gidnumber` is nil, Kanidm
+// auto-assigns one from the entry's UUID; if non-nil, the caller's
+// value is used (typical valid explicit range is 65536–524287).
+// Idempotent — calling on an already-POSIX group is a no-op.
 //
 // Kanidm does NOT support removing the class once set; there is no
 // corresponding DisableGroupPosix.
-func (c *Client) EnableGroupPosix(ctx context.Context, groupID string) error {
-	resp, err := c.doRequest(ctx, "POST", "/v1/group/"+groupID+"/_unix", struct{}{})
+func (c *Client) EnableGroupPosix(ctx context.Context, groupID string, gidNumber *int64) error {
+	body := map[string]any{}
+	if gidNumber != nil {
+		// The /_unix endpoint takes gidnumber as a raw u32, NOT the
+		// array-of-strings convention used by the generic attribute
+		// API. (Kanidm's GroupUnixExtend struct fields are typed.)
+		body["gidnumber"] = uint32(*gidNumber)
+	}
+	resp, err := c.doRequest(ctx, "POST", "/v1/group/"+groupID+"/_unix", body)
 	if err != nil {
 		return fmt.Errorf("enable group posix: %w", err)
 	}
