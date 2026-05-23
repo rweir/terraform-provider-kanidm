@@ -7,8 +7,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -37,6 +39,10 @@ type personResourceModel struct {
 	ID                           types.String `tfsdk:"id"`
 	DisplayName                  types.String `tfsdk:"displayname"`
 	Mail                         types.List   `tfsdk:"mail"`
+	Legalname                    types.String `tfsdk:"legalname"`
+	Posix                        types.Bool   `tfsdk:"posix"`
+	GidNumber                    types.Int64  `tfsdk:"gidnumber"`
+	Loginshell                   types.String `tfsdk:"loginshell"`
 	Password                     types.String `tfsdk:"password"`
 	GenerateCredentialResetToken types.Bool   `tfsdk:"generate_credential_reset_token"`
 	CredentialResetToken         types.String `tfsdk:"credential_reset_token"`
@@ -102,6 +108,50 @@ The user can then visit the Kanidm web UI with the token to set up passkeys or p
 				MarkdownDescription: "Email addresses for the person.",
 				Optional:            true,
 				ElementType:         types.StringType,
+			},
+			"legalname": schema.StringAttribute{
+				MarkdownDescription: "Legal name of the person. " +
+					"If unset in config, the provider leaves whatever value the server holds " +
+					"untouched — so users can change their legalname out-of-band via the kanidm " +
+					"CLI without tofu trying to revert.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"posix": schema.BoolAttribute{
+				MarkdownDescription: "If true, the account has the `posixaccount` class (visible via " +
+					"NSS / `kanidm_unixd`). When unset in config, the provider leaves the server's " +
+					"current POSIX state alone — users can enable POSIX out-of-band without tofu " +
+					"reverting. **Kanidm doesn't support unsetting this once enabled** — flipping " +
+					"true to false is an error.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"gidnumber": schema.Int64Attribute{
+				MarkdownDescription: "POSIX gidnumber for the account. When `posix = true` and this " +
+					"is unset, Kanidm auto-assigns one from the entry's UUID. Set explicitly to " +
+					"pin a specific gid — useful when rebuilding a Kanidm instance and the account " +
+					"already owns files on disk.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.Int64{
+					int64planmodifier.UseStateForUnknown(),
+				},
+			},
+			"loginshell": schema.StringAttribute{
+				MarkdownDescription: "POSIX login shell, e.g. `/bin/zsh`. When unset in config, the " +
+					"provider leaves the server value alone — users can change their shell " +
+					"out-of-band without tofu reverting.",
+				Optional: true,
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"password": schema.StringAttribute{
 				MarkdownDescription: "Password for the person account. **Note:** This is write-only and will not be stored in state. " +
@@ -212,23 +262,55 @@ func (r *personResource) Create(ctx context.Context, req resource.CreateRequest,
 		plan.CredentialResetToken = types.StringValue(token)
 	}
 
-	// Update mail if provided
+	// PATCH any optional attrs the user declared (mail, legalname).
+	// Legalname is only included when explicitly set in config —
+	// matches the "don't touch what tofu doesn't declare" rule so
+	// out-of-band legalname edits aren't reverted.
+	var mailAddrs []string
 	if !plan.Mail.IsNull() && !plan.Mail.IsUnknown() {
-		var mailAddrs []string
 		resp.Diagnostics.Append(plan.Mail.ElementsAs(ctx, &mailAddrs, false)...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
+	}
+	updateOpts := client.UpdatePersonOpts{
+		Mail: mailAddrs,
+	}
+	if !plan.Legalname.IsNull() && !plan.Legalname.IsUnknown() {
+		v := plan.Legalname.ValueString()
+		updateOpts.Legalname = &v
+	}
+	if len(mailAddrs) > 0 || updateOpts.Legalname != nil {
+		if err := r.client.UpdatePerson(ctx, person.ID, updateOpts); err != nil {
+			resp.Diagnostics.AddError(
+				"Error Updating Person",
+				"Person was created but its attributes could not be set: "+err.Error(),
+			)
+			return
+		}
+	}
 
-		if len(mailAddrs) > 0 {
-			tflog.Debug(ctx, "Updating mail addresses for person")
-			if err := r.client.UpdatePerson(ctx, person.ID, "", mailAddrs); err != nil {
-				resp.Diagnostics.AddError(
-					"Error Updating Mail",
-					"Person was created but mail addresses could not be set: "+err.Error(),
-				)
-				return
-			}
+	// Enable POSIX if requested. Pass the explicit gidnumber and/or
+	// loginshell through if the user pinned them; otherwise let
+	// Kanidm pick defaults.
+	if plan.Posix.ValueBool() {
+		var gid *int64
+		if !plan.GidNumber.IsNull() && !plan.GidNumber.IsUnknown() {
+			v := plan.GidNumber.ValueInt64()
+			gid = &v
+		}
+		var shell *string
+		if !plan.Loginshell.IsNull() && !plan.Loginshell.IsUnknown() {
+			s := plan.Loginshell.ValueString()
+			shell = &s
+		}
+		tflog.Debug(ctx, "Enabling POSIX on person", map[string]any{"id": person.ID})
+		if err := r.client.EnablePersonPosix(ctx, person.ID, gid, shell); err != nil {
+			resp.Diagnostics.AddError(
+				"Error Enabling POSIX",
+				"Person was created but POSIX could not be enabled: "+err.Error(),
+			)
+			return
 		}
 	}
 
@@ -253,6 +335,23 @@ func (r *personResource) Create(ctx context.Context, req resource.CreateRequest,
 			return
 		}
 		plan.Mail = mailList
+	}
+
+	// Legalname is Optional+Computed: state must hold whatever the
+	// server has (so future refreshes don't fight out-of-band edits).
+	plan.Legalname = types.StringValue(createdPerson.Legalname)
+
+	// POSIX state. When posix isn't enabled, gidnumber/loginshell are
+	// Null so the UseStateForUnknown planmodifier on a future plan
+	// that doesn't declare them resolves to Null too (no spurious
+	// diff). When posix is enabled, state mirrors server.
+	plan.Posix = types.BoolValue(createdPerson.Posix)
+	if createdPerson.Posix {
+		plan.GidNumber = types.Int64Value(createdPerson.GidNumber)
+		plan.Loginshell = types.StringValue(createdPerson.Loginshell)
+	} else {
+		plan.GidNumber = types.Int64Null()
+		plan.Loginshell = types.StringNull()
 	}
 
 	// Password is write-only, keep the planned value but don't try to read it back
@@ -321,6 +420,22 @@ func (r *personResource) Read(ctx context.Context, req resource.ReadRequest, res
 		state.Mail = types.ListNull(types.StringType)
 	}
 
+	// Mirror legalname unconditionally — UseStateForUnknown handles
+	// the "config doesn't declare it" case at plan-time so this
+	// doesn't introduce drift.
+	state.Legalname = types.StringValue(person.Legalname)
+
+	// Mirror POSIX state. Null gidnumber/loginshell when not POSIX
+	// so subsequent plans that don't declare them don't get diff.
+	state.Posix = types.BoolValue(person.Posix)
+	if person.Posix {
+		state.GidNumber = types.Int64Value(person.GidNumber)
+		state.Loginshell = types.StringValue(person.Loginshell)
+	} else {
+		state.GidNumber = types.Int64Null()
+		state.Loginshell = types.StringNull()
+	}
+
 	// Password is write-only and not readable from API, preserve existing state value
 	// credential_reset_token fields should use defaults when not explicitly set
 	if state.GenerateCredentialResetToken.IsNull() || state.GenerateCredentialResetToken.IsUnknown() {
@@ -360,13 +475,65 @@ func (r *personResource) Update(ctx context.Context, req resource.UpdateRequest,
 		}
 	}
 
-	// Update person attributes (displayname and mail)
-	if err := r.client.UpdatePerson(ctx, plan.ID.ValueString(), plan.DisplayName.ValueString(), mailAddrs); err != nil {
+	// POSIX disable check first — fail fast with a clear diagnostic.
+	wasPosix := state.Posix.ValueBool()
+	wantPosix := plan.Posix.ValueBool()
+	if wasPosix && !wantPosix {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("posix"),
+			"POSIX cannot be disabled",
+			"Kanidm doesn't support removing the `posixaccount` class once it has been set. "+
+				"To remove POSIX status, the person has to be destroyed and re-created.",
+		)
+		return
+	}
+
+	updateOpts := client.UpdatePersonOpts{
+		DisplayName: plan.DisplayName.ValueString(),
+		Mail:        mailAddrs,
+	}
+	// Only PATCH legalname / loginshell when the user has explicitly
+	// changed them. Optional+Computed+UseStateForUnknown means plan
+	// values mirror state when config doesn't declare; the Equal
+	// check distinguishes "user changed it" from "state propagated".
+	if !plan.Legalname.Equal(state.Legalname) {
+		v := plan.Legalname.ValueString()
+		updateOpts.Legalname = &v
+	}
+	if wasPosix && !plan.Loginshell.Equal(state.Loginshell) {
+		s := plan.Loginshell.ValueString()
+		updateOpts.Loginshell = &s
+	}
+
+	if err := r.client.UpdatePerson(ctx, plan.ID.ValueString(), updateOpts); err != nil {
 		resp.Diagnostics.AddError(
 			"Error Updating Person",
 			"Could not update person: "+err.Error(),
 		)
 		return
+	}
+
+	// POSIX enable transition (null/false → true). Pass through an
+	// explicit gidnumber and/or shell if the user pinned them.
+	if !wasPosix && wantPosix {
+		var gid *int64
+		if !plan.GidNumber.IsNull() && !plan.GidNumber.IsUnknown() {
+			v := plan.GidNumber.ValueInt64()
+			gid = &v
+		}
+		var shell *string
+		if !plan.Loginshell.IsNull() && !plan.Loginshell.IsUnknown() {
+			s := plan.Loginshell.ValueString()
+			shell = &s
+		}
+		tflog.Debug(ctx, "Enabling POSIX on person", map[string]any{"id": plan.ID.ValueString()})
+		if err := r.client.EnablePersonPosix(ctx, plan.ID.ValueString(), gid, shell); err != nil {
+			resp.Diagnostics.AddError(
+				"Error Enabling POSIX",
+				"Could not enable POSIX on person: "+err.Error(),
+			)
+			return
+		}
 	}
 
 	// Update password if changed
@@ -419,6 +586,16 @@ func (r *personResource) Update(ctx context.Context, req resource.UpdateRequest,
 		plan.Mail = mailList
 	} else {
 		plan.Mail = types.ListNull(types.StringType)
+	}
+	plan.Legalname = types.StringValue(updatedPerson.Legalname)
+
+	plan.Posix = types.BoolValue(updatedPerson.Posix)
+	if updatedPerson.Posix {
+		plan.GidNumber = types.Int64Value(updatedPerson.GidNumber)
+		plan.Loginshell = types.StringValue(updatedPerson.Loginshell)
+	} else {
+		plan.GidNumber = types.Int64Null()
+		plan.Loginshell = types.StringNull()
 	}
 
 	// Ensure credential_reset_token fields are properly set
