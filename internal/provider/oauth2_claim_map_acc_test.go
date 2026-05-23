@@ -128,6 +128,27 @@ resource "kanidm_oauth2_basic" "test" {
 				Config:   groupsHCL + clientHCL(adminAndEditor),
 				PlanOnly: true,
 			},
+			// Round-trip via import: after the create+update steps
+			// above, the resource has two claim_map entries server-
+			// side. Importing it should produce an identical state.
+			// This is what catches a missing or buggy Read parser for
+			// `oauth2_rs_claim_map` — without it, imported state has
+			// no claim_maps while existing state has two.
+			{
+				ResourceName:      "kanidm_oauth2_basic.test",
+				ImportState:       true,
+				ImportStateVerify: true,
+				// This resource uses `name` as its primary key, not
+				// the framework's default `id`. Tell the harness:
+				//   - what to pass to ImportState (the client name)
+				//   - which attribute to compare states by
+				ImportStateId:                        clientName,
+				ImportStateVerifyIdentifierAttribute: "name",
+				ImportStateVerifyIgnore: []string{
+					// Client secret is never re-readable after import.
+					"client_secret",
+				},
+			},
 			// Mutate the values of an existing entry (Admin -> Admin + GrafanaAdmin).
 			// Removes the Editor entry in the same step.
 			{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -42,13 +43,13 @@ type oauth2BasicResourceModel struct {
 
 type scopeMapModel struct {
 	Group  types.String `tfsdk:"group"`
-	Scopes types.List   `tfsdk:"scopes"`
+	Scopes types.Set    `tfsdk:"scopes"`
 }
 
 type claimMapModel struct {
 	Name   types.String `tfsdk:"name"`
 	Group  types.String `tfsdk:"group"`
-	Values types.List   `tfsdk:"values"`
+	Values types.Set    `tfsdk:"values"`
 }
 
 func (r *oauth2BasicResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -155,10 +156,11 @@ Store it securely immediately after creation. You can regenerate it using the Ka
 							MarkdownDescription: "Name of the Kanidm group to map scopes to.",
 							Required:            true,
 						},
-						"scopes": schema.ListAttribute{
-							MarkdownDescription: "List of OAuth2 scopes to grant to group members (e.g., openid, profile, email, groups).",
-							Required:            true,
-							ElementType:         types.StringType,
+						"scopes": schema.SetAttribute{
+							MarkdownDescription: "Set of OAuth2 scopes to grant to group members (e.g., openid, profile, email, groups). " +
+								"Order is not significant — kanidm normalizes the set on storage.",
+							Required:    true,
+							ElementType: types.StringType,
 						},
 					},
 				},
@@ -179,10 +181,11 @@ Store it securely immediately after creation. You can regenerate it using the Ka
 							MarkdownDescription: "Kanidm group whose members get this claim entry.",
 							Required:            true,
 						},
-						"values": schema.ListAttribute{
-							MarkdownDescription: "Values emitted in the claim for members of `group`.",
-							Required:            true,
-							ElementType:         types.StringType,
+						"values": schema.SetAttribute{
+							MarkdownDescription: "Values emitted in the claim for members of `group`. " +
+								"Order is not significant — kanidm may reorder these.",
+							Required:    true,
+							ElementType: types.StringType,
 						},
 					},
 				},
@@ -480,7 +483,53 @@ func (r *oauth2BasicResource) Read(ctx context.Context, req resource.ReadRequest
 		}
 	}
 
-	// Scope maps preserved from state (can't read them back in current form)
+	// Populate scope_maps and claim_maps from the parsed entry. If the
+	// server has no entries, set state Null (matches "block not
+	// declared in config" semantics — avoids spurious empty-vs-null
+	// drift).
+	scopeMapAttrTypes := map[string]attr.Type{
+		"group":  types.StringType,
+		"scopes": types.SetType{ElemType: types.StringType},
+	}
+	if len(oauth2Client.ScopeMaps) > 0 {
+		scopeMapModels := make([]scopeMapModel, 0, len(oauth2Client.ScopeMaps))
+		for group, scopes := range oauth2Client.ScopeMaps {
+			scopesSet, diags := types.SetValueFrom(ctx, types.StringType, scopes)
+			resp.Diagnostics.Append(diags...)
+			scopeMapModels = append(scopeMapModels, scopeMapModel{
+				Group:  types.StringValue(group),
+				Scopes: scopesSet,
+			})
+		}
+		smSet, diags := types.SetValueFrom(ctx, types.ObjectType{AttrTypes: scopeMapAttrTypes}, scopeMapModels)
+		resp.Diagnostics.Append(diags...)
+		state.ScopeMaps = smSet
+	} else {
+		state.ScopeMaps = types.SetNull(types.ObjectType{AttrTypes: scopeMapAttrTypes})
+	}
+
+	claimMapAttrTypes := map[string]attr.Type{
+		"name":   types.StringType,
+		"group":  types.StringType,
+		"values": types.SetType{ElemType: types.StringType},
+	}
+	if len(oauth2Client.ClaimMaps) > 0 {
+		claimMapModels := make([]claimMapModel, 0, len(oauth2Client.ClaimMaps))
+		for _, cm := range oauth2Client.ClaimMaps {
+			valuesSet, diags := types.SetValueFrom(ctx, types.StringType, cm.Values)
+			resp.Diagnostics.Append(diags...)
+			claimMapModels = append(claimMapModels, claimMapModel{
+				Name:   types.StringValue(cm.Name),
+				Group:  types.StringValue(cm.Group),
+				Values: valuesSet,
+			})
+		}
+		cmSet, diags := types.SetValueFrom(ctx, types.ObjectType{AttrTypes: claimMapAttrTypes}, claimMapModels)
+		resp.Diagnostics.Append(diags...)
+		state.ClaimMaps = cmSet
+	} else {
+		state.ClaimMaps = types.SetNull(types.ObjectType{AttrTypes: claimMapAttrTypes})
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

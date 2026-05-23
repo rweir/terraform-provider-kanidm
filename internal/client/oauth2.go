@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // OAuth2Client represents a Kanidm OAuth2 resource server
@@ -12,6 +13,7 @@ type OAuth2Client struct {
 	Origin       string
 	RedirectURIs []string
 	ScopeMaps    map[string][]string
+	ClaimMaps    []ClaimMapEntry
 	ClientID     string // Computed
 	ClientSecret string // Only for basic/confidential clients, populated on creation
 	IsPublic     bool
@@ -32,6 +34,78 @@ type OAuth2Client struct {
 	// `oauth2_jwt_legacy_crypto_enable`. Same Set-flag convention.
 	JWTLegacyCryptoEnable    bool
 	JWTLegacyCryptoEnableSet bool
+}
+
+// ClaimMapEntry is one (claim_name, group, values) tuple from
+// `oauth2_rs_claim_map`. The on-the-wire format from Kanidm is
+//
+//	<name>:<group>@<domain>:;:"v1,v2,..."
+//
+// — group SPNs come back with the kanidm domain appended.
+type ClaimMapEntry struct {
+	Name   string
+	Group  string
+	Values []string
+}
+
+// parseClaimMapEntry parses one `oauth2_rs_claim_map` line.
+func parseClaimMapEntry(s string) (ClaimMapEntry, bool) {
+	sepIdx := strings.Index(s, ":;:")
+	if sepIdx == -1 {
+		return ClaimMapEntry{}, false
+	}
+	prefix := s[:sepIdx]
+	suffix := strings.TrimSpace(s[sepIdx+len(":;:"):])
+
+	nameSep := strings.Index(prefix, ":")
+	if nameSep == -1 {
+		return ClaimMapEntry{}, false
+	}
+	name := prefix[:nameSep]
+	group := stripSPNDomain(prefix[nameSep+1:])
+
+	suffix = strings.TrimPrefix(strings.TrimSuffix(suffix, `"`), `"`)
+	var values []string
+	if suffix != "" {
+		values = strings.Split(suffix, ",")
+	}
+
+	return ClaimMapEntry{Name: name, Group: group, Values: values}, true
+}
+
+// parseScopeMapEntry parses one `oauth2_rs_scope_map` line. Format:
+//
+//	<group>@<domain>: {"scope1", "scope2", ...}
+//
+// Returns (group, scopes, ok).
+func parseScopeMapEntry(s string) (string, []string, bool) {
+	sepIdx := strings.Index(s, ": {")
+	if sepIdx == -1 {
+		return "", nil, false
+	}
+	group := stripSPNDomain(strings.TrimSpace(s[:sepIdx]))
+	inner := strings.TrimSpace(s[sepIdx+len(": {"):])
+	inner = strings.TrimSuffix(inner, "}")
+
+	var scopes []string
+	for _, part := range strings.Split(inner, ",") {
+		part = strings.TrimSpace(part)
+		part = strings.TrimPrefix(strings.TrimSuffix(part, `"`), `"`)
+		if part != "" {
+			scopes = append(scopes, part)
+		}
+	}
+	return group, scopes, true
+}
+
+// stripSPNDomain strips the @<domain> suffix from a kanidm SPN.
+// Tofu configs use bare group names; the API returns fully qualified
+// SPNs.
+func stripSPNDomain(spn string) string {
+	if at := strings.Index(spn, "@"); at != -1 {
+		return spn[:at]
+	}
+	return spn
 }
 
 // CreateOAuth2BasicClient creates a new OAuth2 basic (confidential) client
@@ -100,10 +174,20 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 		return nil, err
 	}
 
-	// Determine if public based on oauth2_rs_basic_secret attribute presence
-	// Note: The value is hidden for basic clients, so we check if the key exists in attrs
-	_, hasBasicSecret := entry.Attrs["oauth2_rs_basic_secret"]
-	isPublic := !hasBasicSecret
+	// Determine basic vs public from the entry's class array. Older
+	// versions of this provider keyed off `oauth2_rs_basic_secret`
+	// being present, but newer Kanidm versions don't always include
+	// that attribute in GET responses (it's hidden, and some auth
+	// contexts omit hidden attrs entirely). The class array is the
+	// canonical signal.
+	classes := entry.GetStringSlice("class")
+	isPublic := false
+	for _, cls := range classes {
+		if cls == "oauth2_resource_server_public" {
+			isPublic = true
+			break
+		}
+	}
 
 	// Use 'name' attribute for the name (not oauth2_rs_name which is for internal use)
 	clientName := entry.GetString("name")
@@ -124,11 +208,27 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 	disablePKCE, disablePKCESet := entry.GetBool("oauth2_allow_insecure_client_disable_pkce")
 	jwtLegacy, jwtLegacySet := entry.GetBool("oauth2_jwt_legacy_crypto_enable")
 
+	scopeMaps := make(map[string][]string)
+	for _, line := range entry.GetStringSlice("oauth2_rs_scope_map") {
+		if group, scopes, ok := parseScopeMapEntry(line); ok {
+			scopeMaps[group] = scopes
+		}
+	}
+
+	var claimMaps []ClaimMapEntry
+	for _, line := range entry.GetStringSlice("oauth2_rs_claim_map") {
+		if cm, ok := parseClaimMapEntry(line); ok {
+			claimMaps = append(claimMaps, cm)
+		}
+	}
+
 	return &OAuth2Client{
 		Name:         clientName,
 		DisplayName:  entry.GetString("displayname"),
 		Origin:       origin,
 		RedirectURIs: entry.GetStringSlice("oauth2_rs_origin"),
+		ScopeMaps:    scopeMaps,
+		ClaimMaps:    claimMaps,
 		ClientID:     clientName,
 		IsPublic:     isPublic,
 
