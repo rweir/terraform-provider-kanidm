@@ -155,17 +155,24 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 
-	// Map response to state
+	// Map response to state. Preserve null-vs-set distinction:
+	// Terraform's framework requires the new state to match the
+	// plan where the plan was concrete. A plan with `description`
+	// or `members` unset arrives as Null; we must keep that Null
+	// rather than turning it into "" / an empty Set, even if the
+	// API trivially returns either.
 	plan.ID = types.StringValue(createdGroup.ID)
-	plan.Description = types.StringValue(createdGroup.Description)
-
-	// Always set members as a set (empty if no members)
-	membersSet, diags := types.SetValueFrom(ctx, types.StringType, createdGroup.Members)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
+	if !plan.Description.IsNull() || createdGroup.Description != "" {
+		plan.Description = types.StringValue(createdGroup.Description)
 	}
-	plan.Members = membersSet
+	if !plan.Members.IsNull() || len(createdGroup.Members) > 0 {
+		membersSet, diags := types.SetValueFrom(ctx, types.StringType, createdGroup.Members)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		plan.Members = membersSet
+	}
 
 	tflog.Debug(ctx, "Group created successfully", map[string]any{
 		"id": plan.ID.ValueString(),
@@ -203,17 +210,22 @@ func (r *groupResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		return
 	}
 
-	// Update state with current values
+	// Update state with current values. Preserve null-vs-set: if the
+	// API returns a real description / member list, mirror it; if
+	// it's empty AND the existing state was null (user didn't ask
+	// for it), keep state null so refresh doesn't introduce drift.
 	state.ID = types.StringValue(group.ID)
-	state.Description = types.StringValue(group.Description)
-
-	// Always set members as a set (empty if no members)
-	membersSet, diags := types.SetValueFrom(ctx, types.StringType, group.Members)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
+	if !state.Description.IsNull() || group.Description != "" {
+		state.Description = types.StringValue(group.Description)
 	}
-	state.Members = membersSet
+	if !state.Members.IsNull() || len(group.Members) > 0 {
+		membersSet, diags := types.SetValueFrom(ctx, types.StringType, group.Members)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		state.Members = membersSet
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -264,17 +276,19 @@ func (r *groupResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 
-	// Update state
+	// Update state (same null-preservation logic as Create).
 	plan.ID = types.StringValue(updatedGroup.ID)
-	plan.Description = types.StringValue(updatedGroup.Description)
-
-	// Always set members as a set (empty if no members)
-	membersSet, diags := types.SetValueFrom(ctx, types.StringType, updatedGroup.Members)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
+	if !plan.Description.IsNull() || updatedGroup.Description != "" {
+		plan.Description = types.StringValue(updatedGroup.Description)
 	}
-	plan.Members = membersSet
+	if !plan.Members.IsNull() || len(updatedGroup.Members) > 0 {
+		membersSet, diags := types.SetValueFrom(ctx, types.StringType, updatedGroup.Members)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		plan.Members = membersSet
+	}
 
 	tflog.Debug(ctx, "Group updated successfully", map[string]any{
 		"id": plan.ID.ValueString(),
