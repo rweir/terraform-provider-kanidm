@@ -36,6 +36,7 @@ type oauth2BasicResourceModel struct {
 	ClientSecret             types.String `tfsdk:"client_secret"`
 	PreferShortUsername      types.Bool   `tfsdk:"prefer_short_username"`
 	AllowInsecureDisablePKCE types.Bool   `tfsdk:"allow_insecure_client_disable_pkce"`
+	JWTLegacyCryptoEnable    types.Bool   `tfsdk:"jwt_legacy_crypto_enable"`
 }
 
 type scopeMapModel struct {
@@ -127,6 +128,13 @@ Store it securely immediately after creation. You can regenerate it using the Ka
 					"a `code_challenge` (PKCE). Useful only for confidential clients that don't support " +
 					"PKCE (older Forgejo, Netbox, OpenGist). Leave unset for everything else. " +
 					"Maps to Kanidm's `oauth2_allow_insecure_client_disable_pkce` attribute.",
+				Optional: true,
+			},
+			"jwt_legacy_crypto_enable": schema.BoolAttribute{
+				MarkdownDescription: "If true, Kanidm signs this client's JWTs with RS256 in addition to the " +
+					"default ES256. Useful for OIDC libraries that can't speak ES256 (e.g. Netbox's " +
+					"python-social-auth). Leave unset for everything else. " +
+					"Maps to Kanidm's `oauth2_jwt_legacy_crypto_enable` attribute.",
 				Optional: true,
 			},
 		},
@@ -223,6 +231,10 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 		v := plan.AllowInsecureDisablePKCE.ValueBool()
 		updateOpts.AllowInsecureDisablePKCE = &v
 	}
+	if !plan.JWTLegacyCryptoEnable.IsNull() && !plan.JWTLegacyCryptoEnable.IsUnknown() {
+		v := plan.JWTLegacyCryptoEnable.ValueBool()
+		updateOpts.JWTLegacyCryptoEnable = &v
+	}
 
 	if err := r.client.UpdateOAuth2Client(ctx, oauth2Client.Name, updateOpts); err != nil {
 		resp.Diagnostics.AddError(
@@ -299,6 +311,10 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 	if !plan.AllowInsecureDisablePKCE.IsNull() || createdClient.AllowInsecureDisablePKCESet {
 		plan.AllowInsecureDisablePKCE = types.BoolValue(createdClient.AllowInsecureDisablePKCE)
 	}
+	// Same null-preservation for jwt_legacy_crypto_enable.
+	if !plan.JWTLegacyCryptoEnable.IsNull() || createdClient.JWTLegacyCryptoEnableSet {
+		plan.JWTLegacyCryptoEnable = types.BoolValue(createdClient.JWTLegacyCryptoEnable)
+	}
 
 	// Keep the scope maps from the plan (can't read them back from API in current form)
 	// In a future enhancement, we could parse the scope maps from the API response
@@ -364,6 +380,10 @@ func (r *oauth2BasicResource) Read(ctx context.Context, req resource.ReadRequest
 	// Same null-preservation for allow_insecure_client_disable_pkce.
 	if !state.AllowInsecureDisablePKCE.IsNull() || oauth2Client.AllowInsecureDisablePKCESet {
 		state.AllowInsecureDisablePKCE = types.BoolValue(oauth2Client.AllowInsecureDisablePKCE)
+	}
+	// Same null-preservation for jwt_legacy_crypto_enable.
+	if !state.JWTLegacyCryptoEnable.IsNull() || oauth2Client.JWTLegacyCryptoEnableSet {
+		state.JWTLegacyCryptoEnable = types.BoolValue(oauth2Client.JWTLegacyCryptoEnable)
 	}
 
 	if len(oauth2Client.RedirectURIs) > 0 {
@@ -446,6 +466,13 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 	} else if !state.AllowInsecureDisablePKCE.IsNull() {
 		v := false
 		updateOpts.AllowInsecureDisablePKCE = &v
+	}
+	if !plan.JWTLegacyCryptoEnable.IsNull() && !plan.JWTLegacyCryptoEnable.IsUnknown() {
+		v := plan.JWTLegacyCryptoEnable.ValueBool()
+		updateOpts.JWTLegacyCryptoEnable = &v
+	} else if !state.JWTLegacyCryptoEnable.IsNull() {
+		v := false
+		updateOpts.JWTLegacyCryptoEnable = &v
 	}
 
 	if err := r.client.UpdateOAuth2Client(ctx, plan.Name.ValueString(), updateOpts); err != nil {
@@ -551,6 +578,10 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 	// Same for allow_insecure_client_disable_pkce.
 	if !plan.AllowInsecureDisablePKCE.IsNull() || updatedClient.AllowInsecureDisablePKCESet {
 		plan.AllowInsecureDisablePKCE = types.BoolValue(updatedClient.AllowInsecureDisablePKCE)
+	}
+	// Same for jwt_legacy_crypto_enable.
+	if !plan.JWTLegacyCryptoEnable.IsNull() || updatedClient.JWTLegacyCryptoEnableSet {
+		plan.JWTLegacyCryptoEnable = types.BoolValue(updatedClient.JWTLegacyCryptoEnable)
 	}
 
 	// Preserve client secret from state (cannot be read back from API)

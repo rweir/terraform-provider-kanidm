@@ -27,6 +27,11 @@ type OAuth2Client struct {
 	// convention as PreferShortUsername.
 	AllowInsecureDisablePKCE    bool
 	AllowInsecureDisablePKCESet bool
+
+	// JWTLegacyCryptoEnable mirrors Kanidm's
+	// `oauth2_jwt_legacy_crypto_enable`. Same Set-flag convention.
+	JWTLegacyCryptoEnable    bool
+	JWTLegacyCryptoEnableSet bool
 }
 
 // CreateOAuth2BasicClient creates a new OAuth2 basic (confidential) client
@@ -117,6 +122,7 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 
 	preferShort, preferShortSet := entry.GetBool("oauth2_prefer_short_username")
 	disablePKCE, disablePKCESet := entry.GetBool("oauth2_allow_insecure_client_disable_pkce")
+	jwtLegacy, jwtLegacySet := entry.GetBool("oauth2_jwt_legacy_crypto_enable")
 
 	return &OAuth2Client{
 		Name:         clientName,
@@ -131,6 +137,9 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 
 		AllowInsecureDisablePKCE:    disablePKCE,
 		AllowInsecureDisablePKCESet: disablePKCESet,
+
+		JWTLegacyCryptoEnable:    jwtLegacy,
+		JWTLegacyCryptoEnableSet: jwtLegacySet,
 		// Note: Client secret is never returned in GET responses
 	}, nil
 }
@@ -146,6 +155,7 @@ type UpdateOAuth2ClientOpts struct {
 	RedirectURIs             []string
 	PreferShortUsername      *bool
 	AllowInsecureDisablePKCE *bool
+	JWTLegacyCryptoEnable    *bool
 }
 
 // UpdateOAuth2Client PATCHes the named OAuth2 client. Only attributes
@@ -183,6 +193,16 @@ func (c *Client) UpdateOAuth2Client(ctx context.Context, name string, opts Updat
 		} else {
 			attrs["oauth2_allow_insecure_client_disable_pkce"] = []string{}
 		}
+	}
+
+	if opts.JWTLegacyCryptoEnable != nil {
+		// Symmetric with prefer_short_username: kanidm accepts
+		// ["true"] / ["false"] on the same attribute.
+		val := "false"
+		if *opts.JWTLegacyCryptoEnable {
+			val = "true"
+		}
+		attrs["oauth2_jwt_legacy_crypto_enable"] = []string{val}
 	}
 
 	req := NewUpdateRequest(attrs)
