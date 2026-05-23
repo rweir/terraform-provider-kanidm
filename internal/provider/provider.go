@@ -156,5 +156,6 @@ func (p *kanidmProvider) Resources(_ context.Context) []func() resource.Resource
 		NewServiceAccountResource,
 		NewGroupResource,
 		NewOAuth2BasicResource,
+		NewApplicationResource,
 	}
 }
