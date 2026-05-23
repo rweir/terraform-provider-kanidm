@@ -37,11 +37,18 @@ type oauth2BasicResourceModel struct {
 	PreferShortUsername      types.Bool   `tfsdk:"prefer_short_username"`
 	AllowInsecureDisablePKCE types.Bool   `tfsdk:"allow_insecure_client_disable_pkce"`
 	JWTLegacyCryptoEnable    types.Bool   `tfsdk:"jwt_legacy_crypto_enable"`
+	ClaimMaps                types.Set    `tfsdk:"claim_map"`
 }
 
 type scopeMapModel struct {
 	Group  types.String `tfsdk:"group"`
 	Scopes types.List   `tfsdk:"scopes"`
+}
+
+type claimMapModel struct {
+	Name   types.String `tfsdk:"name"`
+	Group  types.String `tfsdk:"group"`
+	Values types.List   `tfsdk:"values"`
 }
 
 func (r *oauth2BasicResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -150,6 +157,30 @@ Store it securely immediately after creation. You can regenerate it using the Ka
 						},
 						"scopes": schema.ListAttribute{
 							MarkdownDescription: "List of OAuth2 scopes to grant to group members (e.g., openid, profile, email, groups).",
+							Required:            true,
+							ElementType:         types.StringType,
+						},
+					},
+				},
+			},
+			"claim_map": schema.SetNestedBlock{
+				MarkdownDescription: "Claim mappings emit arbitrary string values in OIDC claims based on group " +
+					"membership. Each block is keyed by the (name, group) tuple: when a user in `group` " +
+					"authenticates against this client, `values` are joined into the `name` claim. " +
+					"Used for role-like claims (Grafana `grafana_role`, Netbox `roles`, Otterwiki " +
+					"`wiki_group`, …). Maps to Kanidm's `oauth2_rs_claim_map` attribute.",
+				NestedObject: schema.NestedBlockObject{
+					Attributes: map[string]schema.Attribute{
+						"name": schema.StringAttribute{
+							MarkdownDescription: "Name of the OIDC claim to emit (e.g. `grafana_role`).",
+							Required:            true,
+						},
+						"group": schema.StringAttribute{
+							MarkdownDescription: "Kanidm group whose members get this claim entry.",
+							Required:            true,
+						},
+						"values": schema.ListAttribute{
+							MarkdownDescription: "Values emitted in the claim for members of `group`.",
 							Required:            true,
 							ElementType:         types.StringType,
 						},
@@ -268,6 +299,38 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 				resp.Diagnostics.AddError(
 					"Error Setting Scope Map",
 					"OAuth2 client was created but scope map could not be configured: "+err.Error(),
+				)
+				return
+			}
+		}
+	}
+
+	// Configure claim maps if provided. Each claim_map entry is its
+	// own sub-resource at /v1/oauth2/<rs>/_claimmap/<name>/<group>.
+	if !plan.ClaimMaps.IsNull() && !plan.ClaimMaps.IsUnknown() {
+		var claimMaps []claimMapModel
+		resp.Diagnostics.Append(plan.ClaimMaps.ElementsAs(ctx, &claimMaps, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		for _, cm := range claimMaps {
+			var values []string
+			resp.Diagnostics.Append(cm.Values.ElementsAs(ctx, &values, false)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			tflog.Debug(ctx, "Setting claim map for OAuth2 client", map[string]any{
+				"name":   cm.Name.ValueString(),
+				"group":  cm.Group.ValueString(),
+				"values": values,
+			})
+
+			if err := r.client.SetOAuth2ClaimMap(ctx, oauth2Client.Name, cm.Name.ValueString(), cm.Group.ValueString(), values); err != nil {
+				resp.Diagnostics.AddError(
+					"Error Setting Claim Map",
+					"OAuth2 client was created but claim map could not be configured: "+err.Error(),
 				)
 				return
 			}
@@ -539,6 +602,68 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 			resp.Diagnostics.AddError(
 				"Error Setting Scope Map",
 				"Could not set scope map: "+err.Error(),
+			)
+			return
+		}
+	}
+
+	// Handle claim_map changes. Each entry is keyed by the (name,
+	// group) tuple; we diff state vs plan and delete entries that are
+	// gone, then upsert the rest. Mirrors the scope_map diff above.
+	var oldClaimMaps, newClaimMaps []claimMapModel
+	resp.Diagnostics.Append(state.ClaimMaps.ElementsAs(ctx, &oldClaimMaps, false)...)
+	resp.Diagnostics.Append(plan.ClaimMaps.ElementsAs(ctx, &newClaimMaps, false)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	type claimKey struct{ Name, Group string }
+	oldClaimsByKey := make(map[claimKey][]string)
+	for _, cm := range oldClaimMaps {
+		var values []string
+		resp.Diagnostics.Append(cm.Values.ElementsAs(ctx, &values, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		oldClaimsByKey[claimKey{cm.Name.ValueString(), cm.Group.ValueString()}] = values
+	}
+
+	newClaimsByKey := make(map[claimKey][]string)
+	for _, cm := range newClaimMaps {
+		var values []string
+		resp.Diagnostics.Append(cm.Values.ElementsAs(ctx, &values, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		newClaimsByKey[claimKey{cm.Name.ValueString(), cm.Group.ValueString()}] = values
+	}
+
+	for key := range oldClaimsByKey {
+		if _, exists := newClaimsByKey[key]; !exists {
+			tflog.Debug(ctx, "Deleting claim map", map[string]any{
+				"name":  key.Name,
+				"group": key.Group,
+			})
+			if err := r.client.DeleteOAuth2ClaimMap(ctx, plan.Name.ValueString(), key.Name, key.Group); err != nil {
+				resp.Diagnostics.AddError(
+					"Error Deleting Claim Map",
+					"Could not delete claim map: "+err.Error(),
+				)
+				return
+			}
+		}
+	}
+
+	for key, values := range newClaimsByKey {
+		tflog.Debug(ctx, "Setting claim map", map[string]any{
+			"name":   key.Name,
+			"group":  key.Group,
+			"values": values,
+		})
+		if err := r.client.SetOAuth2ClaimMap(ctx, plan.Name.ValueString(), key.Name, key.Group, values); err != nil {
+			resp.Diagnostics.AddError(
+				"Error Setting Claim Map",
+				"Could not set claim map: "+err.Error(),
 			)
 			return
 		}

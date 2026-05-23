@@ -250,6 +250,33 @@ func (c *Client) DeleteOAuth2ScopeMap(ctx context.Context, rsName, groupName str
 	return nil
 }
 
+// SetOAuth2ClaimMap sets one claim_map entry on an OAuth2 client.
+// Each entry is keyed by the (claim_name, group) tuple; values is
+// the list of strings to emit when a user in `group` is granted
+// `claim_name`. POSTing replaces any existing values for that tuple.
+func (c *Client) SetOAuth2ClaimMap(ctx context.Context, rsName, claimName, groupName string, values []string) error {
+	resp, err := c.doRequest(ctx, "POST",
+		fmt.Sprintf("/v1/oauth2/%s/_claimmap/%s/%s", rsName, claimName, groupName), values)
+	if err != nil {
+		return fmt.Errorf("set oauth2 claim map: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
+// DeleteOAuth2ClaimMap removes one claim_map entry from an OAuth2 client.
+func (c *Client) DeleteOAuth2ClaimMap(ctx context.Context, rsName, claimName, groupName string) error {
+	resp, err := c.doRequest(ctx, "DELETE",
+		fmt.Sprintf("/v1/oauth2/%s/_claimmap/%s/%s", rsName, claimName, groupName), nil)
+	if err != nil {
+		return fmt.Errorf("delete oauth2 claim map: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
 // GetOAuth2BasicSecret retrieves the client secret for a basic OAuth2 client
 func (c *Client) GetOAuth2BasicSecret(ctx context.Context, name string) (string, error) {
 	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/v1/oauth2/%s/_basic_secret", name), nil)
