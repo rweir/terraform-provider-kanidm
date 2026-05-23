@@ -94,9 +94,11 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 		clientName = entry.GetString("oauth2_rs_name")
 	}
 
-	// Get origin and normalize by removing trailing slash if present
-	// (Kanidm adds trailing slash, but Terraform configs typically don't have it)
-	origin := entry.GetString("oauth2_rs_origin")
+	// Get origin (post-auth landing URL) and normalize by removing trailing
+	// slash if present — Kanidm adds it but Terraform configs typically don't.
+	// Kanidm calls this oauth2_rs_origin_landing. The multi-valued
+	// oauth2_rs_origin holds the OAuth2 callback URLs (redirect_uris).
+	origin := entry.GetString("oauth2_rs_origin_landing")
 	if len(origin) > 0 && origin[len(origin)-1] == '/' {
 		origin = origin[:len(origin)-1]
 	}
@@ -105,7 +107,7 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 		Name:         clientName,
 		DisplayName:  entry.GetString("displayname"),
 		Origin:       origin,
-		RedirectURIs: entry.GetStringSlice("oauth2_rs_origin_landing"),
+		RedirectURIs: entry.GetStringSlice("oauth2_rs_origin"),
 		ClientID:     clientName,
 		IsPublic:     isPublic,
 		// Note: Client secret is never returned in GET responses
@@ -121,11 +123,11 @@ func (c *Client) UpdateOAuth2Client(ctx context.Context, name string, displayNam
 	}
 
 	if origin != "" {
-		attrs["oauth2_rs_origin"] = []string{origin}
+		attrs["oauth2_rs_origin_landing"] = []string{origin}
 	}
 
 	if redirectURIs != nil {
-		attrs["oauth2_rs_origin_landing"] = redirectURIs
+		attrs["oauth2_rs_origin"] = redirectURIs
 	}
 
 	req := NewUpdateRequest(attrs)
