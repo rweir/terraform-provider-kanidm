@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,18 @@ func WithHTTPClient(client *http.Client) ClientOption {
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *Client) {
 		c.httpClient.Timeout = timeout
+	}
+}
+
+// WithInsecureSkipVerify disables TLS certificate verification.
+// Only useful for testing against a server with a self-signed cert —
+// never enable this against production.
+func WithInsecureSkipVerify() ClientOption {
+	return func(c *Client) {
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // gated by provider opt-in
+		}
+		c.httpClient.Transport = tr
 	}
 }
 

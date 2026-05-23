@@ -24,8 +24,9 @@ type kanidmProvider struct {
 
 // kanidmProviderModel describes the provider data model
 type kanidmProviderModel struct {
-	URL   types.String `tfsdk:"url"`
-	Token types.String `tfsdk:"token"`
+	URL                types.String `tfsdk:"url"`
+	Token              types.String `tfsdk:"token"`
+	InsecureSkipVerify types.Bool   `tfsdk:"insecure_skip_verify"`
 }
 
 // New creates a new provider instance
@@ -56,6 +57,11 @@ func (p *kanidmProvider) Schema(_ context.Context, _ provider.SchemaRequest, res
 				Description: "Kanidm API token for authentication. May also be provided via KANIDM_TOKEN environment variable.",
 				Optional:    true,
 				Sensitive:   true,
+			},
+			"insecure_skip_verify": schema.BoolAttribute{
+				Description: "Disable TLS certificate verification. ONLY for testing against a self-signed cert; never use in production. " +
+					"May also be enabled via KANIDM_INSECURE_SKIP_VERIFY=1.",
+				Optional: true,
 			},
 		},
 	}
@@ -103,16 +109,29 @@ func (p *kanidmProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		)
 	}
 
+	// Resolve insecure_skip_verify from configuration or environment variable
+	insecureSkipVerify := os.Getenv("KANIDM_INSECURE_SKIP_VERIFY") == "1" ||
+		os.Getenv("KANIDM_INSECURE_SKIP_VERIFY") == "true"
+	if !config.InsecureSkipVerify.IsNull() {
+		insecureSkipVerify = config.InsecureSkipVerify.ValueBool()
+	}
+
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	// Create Kanidm client
 	tflog.Debug(ctx, "Creating Kanidm client", map[string]any{
-		"url": url,
+		"url":                  url,
+		"insecure_skip_verify": insecureSkipVerify,
 	})
 
-	apiClient := client.NewClient(url, token)
+	opts := []client.ClientOption{}
+	if insecureSkipVerify {
+		opts = append(opts, client.WithInsecureSkipVerify())
+		tflog.Warn(ctx, "TLS certificate verification disabled — only safe against trusted local servers")
+	}
+	apiClient := client.NewClient(url, token, opts...)
 
 	// Make the client available to data sources and resources
 	resp.DataSourceData = apiClient
