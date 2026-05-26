@@ -32,6 +32,7 @@ type serviceAccountResourceModel struct {
 	DisplayName    types.String `tfsdk:"displayname"`
 	APIToken       types.String `tfsdk:"api_token"`
 	EntryManagedBy types.Set    `tfsdk:"entry_managed_by"`
+	MemberOf       types.Set    `tfsdk:"member_of"`
 }
 
 func (r *serviceAccountResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -86,6 +87,16 @@ Store it securely immediately after creation.`,
 					"This allows delegated administration, including API token generation. " +
 					"**Required by Kanidm.** Use fully-qualified names (e.g., `terraform-admin@idm.s8i.ca`).",
 				Required:    true,
+				ElementType: types.StringType,
+			},
+			"member_of": schema.SetAttribute{
+				MarkdownDescription: "Groups the service account is a member of. When declared, tofu " +
+					"ensures the SA belongs to exactly these groups (adds missing, removes obsolete). " +
+					"When undeclared, tofu doesn't touch the SA's memberships at all — useful for " +
+					"adding the SA to kanidm builtin groups (like `idm_unix_authentication_read` or " +
+					"`idm_mail_servers`) that we don't manage from the group side. Bare group names; " +
+					"the SPN suffix is stripped on Read.",
+				Optional:    true,
 				ElementType: types.StringType,
 			},
 		},
@@ -155,6 +166,33 @@ func (r *serviceAccountResource) Create(ctx context.Context, req resource.Create
 		plan.EntryManagedBy = types.SetNull(types.StringType)
 	}
 
+	// member_of: add the SA to each declared group, then mirror state
+	// from the server. If undeclared in config, leave it Null so future
+	// plans don't touch memberships (the SA may be in groups via other
+	// means; we don't own those).
+	if !plan.MemberOf.IsNull() && !plan.MemberOf.IsUnknown() {
+		var wantGroups []string
+		resp.Diagnostics.Append(plan.MemberOf.ElementsAs(ctx, &wantGroups, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		for _, g := range wantGroups {
+			if err := r.client.AddMemberToGroup(ctx, g, sa.ID); err != nil {
+				resp.Diagnostics.AddError(
+					"Error Adding Service Account to Group",
+					"Service account was created but could not be added to group "+g+": "+err.Error(),
+				)
+				return
+			}
+		}
+		memberOfSet, diags := types.SetValueFrom(ctx, types.StringType, wantGroups)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		plan.MemberOf = memberOfSet
+	}
+
 	tflog.Debug(ctx, "Service account created successfully", map[string]any{
 		"id":          plan.ID.ValueString(),
 		"displayname": plan.DisplayName.ValueString(),
@@ -207,6 +245,14 @@ func (r *serviceAccountResource) Read(ctx context.Context, req resource.ReadRequ
 	} else {
 		state.EntryManagedBy = types.SetNull(types.StringType)
 	}
+
+	// member_of: state is authoritative — we trust what Create/Update
+	// last wrote rather than mirroring from the server. Kanidm's
+	// service_account GET response doesn't reliably return
+	// `directmemberof`, so reading membership back would clobber
+	// state with an empty set and produce a permanent diff/apply
+	// cycle. Trade-off: out-of-band group additions or removals
+	// won't be detected by refresh — accept that limitation.
 
 	// API token is write-only and cannot be read back, preserve existing state value
 
@@ -278,6 +324,61 @@ func (r *serviceAccountResource) Update(ctx context.Context, req resource.Update
 			)
 			return
 		}
+	}
+
+	// member_of: diff old vs new and add/remove deltas. If config has
+	// dropped the declaration entirely (plan Null, state non-Null),
+	// remove the SA from every group state had tracked.
+	var oldMemberOf, newMemberOf []string
+	if !state.MemberOf.IsNull() && !state.MemberOf.IsUnknown() {
+		resp.Diagnostics.Append(state.MemberOf.ElementsAs(ctx, &oldMemberOf, false)...)
+	}
+	if !plan.MemberOf.IsNull() && !plan.MemberOf.IsUnknown() {
+		resp.Diagnostics.Append(plan.MemberOf.ElementsAs(ctx, &newMemberOf, false)...)
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	oldSet := make(map[string]struct{}, len(oldMemberOf))
+	for _, g := range oldMemberOf {
+		oldSet[g] = struct{}{}
+	}
+	newSet := make(map[string]struct{}, len(newMemberOf))
+	for _, g := range newMemberOf {
+		newSet[g] = struct{}{}
+	}
+	for g := range oldSet {
+		if _, keep := newSet[g]; !keep {
+			if err := r.client.RemoveMemberFromGroup(ctx, g, plan.ID.ValueString()); err != nil {
+				resp.Diagnostics.AddError(
+					"Error Removing Service Account from Group",
+					"Could not remove service account from group "+g+": "+err.Error(),
+				)
+				return
+			}
+		}
+	}
+	for g := range newSet {
+		if _, had := oldSet[g]; !had {
+			if err := r.client.AddMemberToGroup(ctx, g, plan.ID.ValueString()); err != nil {
+				resp.Diagnostics.AddError(
+					"Error Adding Service Account to Group",
+					"Could not add service account to group "+g+": "+err.Error(),
+				)
+				return
+			}
+		}
+	}
+	// Mirror the final desired state — plan if declared, Null if not.
+	if !plan.MemberOf.IsNull() && !plan.MemberOf.IsUnknown() {
+		memberOfSet, diags := types.SetValueFrom(ctx, types.StringType, newMemberOf)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		plan.MemberOf = memberOfSet
+	} else {
+		plan.MemberOf = types.SetNull(types.StringType)
 	}
 
 	// Preserve API token (cannot be updated)

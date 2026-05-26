@@ -14,6 +14,10 @@ type ServiceAccount struct {
 	DisplayName    string
 	APIToken       string   // Only populated on creation
 	EntryManagedBy []string // Account/group IDs that can manage this entry
+	// MemberOf is the set of groups the account is a direct member
+	// of. Populated from the `directmemberof` attribute on the entry
+	// (which excludes inherited memberships via nested groups).
+	MemberOf []string
 }
 
 // CreateServiceAccount creates a new service account
@@ -67,12 +71,71 @@ func (c *Client) GetServiceAccount(ctx context.Context, id string) (*ServiceAcco
 		return nil, err
 	}
 
+	// directmemberof comes back as SPN-form strings like
+	// `idm_mail_servers@sso.erti.us`. Strip the domain so the values
+	// round-trip cleanly against bare group names users typically
+	// declare in HCL.
+	directMemberOf := entry.GetStringSlice("directmemberof")
+	memberOf := make([]string, 0, len(directMemberOf))
+	for _, m := range directMemberOf {
+		memberOf = append(memberOf, stripSPNDomain(m))
+	}
+
 	return &ServiceAccount{
 		ID:             entry.GetString("name"),
 		DisplayName:    entry.GetString("displayname"),
 		EntryManagedBy: entry.GetStringSlice("entry_managed_by"),
+		MemberOf:       memberOf,
 		// Note: API tokens are not returned in GET responses
 	}, nil
+}
+
+// AddMemberToGroup appends a single member to the named group's
+// `member` attribute via a read-modify-write PATCH. Idempotent —
+// adding an existing member is a no-op. Used by the service-account
+// resource's `member_of` management to add the SA to groups (often
+// kanidm builtins) without taking ownership of the group itself.
+func (c *Client) AddMemberToGroup(ctx context.Context, groupID, memberID string) error {
+	current, err := c.GetGroup(ctx, groupID)
+	if err != nil {
+		return fmt.Errorf("add member to group %q: read current: %w", groupID, err)
+	}
+	for _, m := range current.Members {
+		if stripSPNDomain(m) == memberID || m == memberID {
+			return nil // already there
+		}
+	}
+	newMembers := append([]string{}, current.Members...)
+	newMembers = append(newMembers, memberID)
+	if err := c.UpdateGroup(ctx, groupID, "", newMembers); err != nil {
+		return fmt.Errorf("add member to group %q: %w", groupID, err)
+	}
+	return nil
+}
+
+// RemoveMemberFromGroup removes a single member from the named
+// group's `member` attribute via a read-modify-write PATCH. Idempotent.
+func (c *Client) RemoveMemberFromGroup(ctx context.Context, groupID, memberID string) error {
+	current, err := c.GetGroup(ctx, groupID)
+	if err != nil {
+		return fmt.Errorf("remove member from group %q: read current: %w", groupID, err)
+	}
+	newMembers := make([]string, 0, len(current.Members))
+	removed := false
+	for _, m := range current.Members {
+		if stripSPNDomain(m) == memberID || m == memberID {
+			removed = true
+			continue
+		}
+		newMembers = append(newMembers, m)
+	}
+	if !removed {
+		return nil // nothing to do
+	}
+	if err := c.UpdateGroup(ctx, groupID, "", newMembers); err != nil {
+		return fmt.Errorf("remove member from group %q: %w", groupID, err)
+	}
+	return nil
 }
 
 // UpdateServiceAccount updates a service account
