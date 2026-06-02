@@ -34,6 +34,7 @@ type oauth2BasicResourceModel struct {
 	Origin                   types.String `tfsdk:"origin"`
 	RedirectURIs             types.Set    `tfsdk:"redirect_uris"`
 	ScopeMaps                types.Set    `tfsdk:"scope_map"`
+	SupplementalScopeMaps    types.Set    `tfsdk:"supplemental_scope_map"`
 	ClientSecret             types.String `tfsdk:"client_secret"`
 	RefreshTokenExpiry       types.Int64  `tfsdk:"refresh_token_expiry"`
 	PreferShortUsername      types.Bool   `tfsdk:"prefer_short_username"`
@@ -84,6 +85,11 @@ resource "kanidm_oauth2_basic" "grafana" {
   scope_map {
     group  = "developers"
     scopes = ["openid", "profile", "email"]
+  }
+
+  supplemental_scope_map {
+    group  = "developers"
+    scopes = ["ssh_publickeys"]
   }
 }
 
@@ -168,6 +174,27 @@ Store it securely immediately after creation. You can regenerate it using the Ka
 						"scopes": schema.SetAttribute{
 							MarkdownDescription: "Set of OAuth2 scopes to grant to group members (e.g., openid, profile, email, groups). " +
 								"Order is not significant — kanidm normalizes the set on storage.",
+							Required:    true,
+							ElementType: types.StringType,
+						},
+					},
+				},
+			},
+			"supplemental_scope_map": schema.SetNestedBlock{
+				MarkdownDescription: "Supplemental scope mappings that add OAuth2 scopes for members of specific groups " +
+					"without requiring the client to request those scopes during the authorization flow. " +
+					"Useful for provider-supplied claims that should accompany ordinary requested scopes " +
+					"(for example Kanidm's `ssh_publickeys` claim). Maps to Kanidm's " +
+					"`oauth2_rs_sup_scope_map` attribute.",
+				NestedObject: schema.NestedBlockObject{
+					Attributes: map[string]schema.Attribute{
+						"group": schema.StringAttribute{
+							MarkdownDescription: "Name of the Kanidm group to map supplemental scopes to.",
+							Required:            true,
+						},
+						"scopes": schema.SetAttribute{
+							MarkdownDescription: "Set of OAuth2 scopes to grant supplementally to group members " +
+								"(e.g., ssh_publickeys). Order is not significant — kanidm normalizes the set on storage.",
 							Required:    true,
 							ElementType: types.StringType,
 						},
@@ -315,6 +342,36 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 				resp.Diagnostics.AddError(
 					"Error Setting Scope Map",
 					"OAuth2 client was created but scope map could not be configured: "+err.Error(),
+				)
+				return
+			}
+		}
+	}
+
+	// Configure supplemental scope maps if provided
+	if !plan.SupplementalScopeMaps.IsNull() && !plan.SupplementalScopeMaps.IsUnknown() {
+		var supplementalScopeMaps []scopeMapModel
+		resp.Diagnostics.Append(plan.SupplementalScopeMaps.ElementsAs(ctx, &supplementalScopeMaps, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		for _, scopeMap := range supplementalScopeMaps {
+			var scopes []string
+			resp.Diagnostics.Append(scopeMap.Scopes.ElementsAs(ctx, &scopes, false)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+
+			tflog.Debug(ctx, "Setting supplemental scope map for OAuth2 client", map[string]any{
+				"group":  scopeMap.Group.ValueString(),
+				"scopes": scopes,
+			})
+
+			if err := r.client.SetOAuth2SupplementalScopeMap(ctx, oauth2Client.Name, scopeMap.Group.ValueString(), scopes); err != nil {
+				resp.Diagnostics.AddError(
+					"Error Setting Supplemental Scope Map",
+					"OAuth2 client was created but supplemental scope map could not be configured: "+err.Error(),
 				)
 				return
 			}
@@ -504,10 +561,10 @@ func (r *oauth2BasicResource) Read(ctx context.Context, req resource.ReadRequest
 		}
 	}
 
-	// Populate scope_maps and claim_maps from the parsed entry. If the
-	// server has no entries, set state Null (matches "block not
-	// declared in config" semantics — avoids spurious empty-vs-null
-	// drift).
+	// Populate scope_maps, supplemental_scope_maps and claim_maps from
+	// the parsed entry. If the server has no entries, set state Null
+	// (matches "block not declared in config" semantics — avoids
+	// spurious empty-vs-null drift).
 	scopeMapAttrTypes := map[string]attr.Type{
 		"group":  types.StringType,
 		"scopes": types.SetType{ElemType: types.StringType},
@@ -527,6 +584,23 @@ func (r *oauth2BasicResource) Read(ctx context.Context, req resource.ReadRequest
 		state.ScopeMaps = smSet
 	} else {
 		state.ScopeMaps = types.SetNull(types.ObjectType{AttrTypes: scopeMapAttrTypes})
+	}
+
+	if len(oauth2Client.SupScopeMaps) > 0 {
+		scopeMapModels := make([]scopeMapModel, 0, len(oauth2Client.SupScopeMaps))
+		for group, scopes := range oauth2Client.SupScopeMaps {
+			scopesSet, diags := types.SetValueFrom(ctx, types.StringType, scopes)
+			resp.Diagnostics.Append(diags...)
+			scopeMapModels = append(scopeMapModels, scopeMapModel{
+				Group:  types.StringValue(group),
+				Scopes: scopesSet,
+			})
+		}
+		smSet, diags := types.SetValueFrom(ctx, types.ObjectType{AttrTypes: scopeMapAttrTypes}, scopeMapModels)
+		resp.Diagnostics.Append(diags...)
+		state.SupplementalScopeMaps = smSet
+	} else {
+		state.SupplementalScopeMaps = types.SetNull(types.ObjectType{AttrTypes: scopeMapAttrTypes})
 	}
 
 	claimMapAttrTypes := map[string]attr.Type{
@@ -685,6 +759,63 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 			resp.Diagnostics.AddError(
 				"Error Setting Scope Map",
 				"Could not set scope map: "+err.Error(),
+			)
+			return
+		}
+	}
+
+	// Handle supplemental scope map changes
+	var oldSupplementalScopeMaps, newSupplementalScopeMaps []scopeMapModel
+	resp.Diagnostics.Append(state.SupplementalScopeMaps.ElementsAs(ctx, &oldSupplementalScopeMaps, false)...)
+	resp.Diagnostics.Append(plan.SupplementalScopeMaps.ElementsAs(ctx, &newSupplementalScopeMaps, false)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	oldSupplementalScopeMapsByGroup := make(map[string][]string)
+	for _, sm := range oldSupplementalScopeMaps {
+		var scopes []string
+		resp.Diagnostics.Append(sm.Scopes.ElementsAs(ctx, &scopes, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		oldSupplementalScopeMapsByGroup[sm.Group.ValueString()] = scopes
+	}
+
+	newSupplementalScopeMapsByGroup := make(map[string][]string)
+	for _, sm := range newSupplementalScopeMaps {
+		var scopes []string
+		resp.Diagnostics.Append(sm.Scopes.ElementsAs(ctx, &scopes, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		newSupplementalScopeMapsByGroup[sm.Group.ValueString()] = scopes
+	}
+
+	for group := range oldSupplementalScopeMapsByGroup {
+		if _, exists := newSupplementalScopeMapsByGroup[group]; !exists {
+			tflog.Debug(ctx, "Deleting supplemental scope map", map[string]any{
+				"group": group,
+			})
+			if err := r.client.DeleteOAuth2SupplementalScopeMap(ctx, plan.Name.ValueString(), group); err != nil {
+				resp.Diagnostics.AddError(
+					"Error Deleting Supplemental Scope Map",
+					"Could not delete supplemental scope map: "+err.Error(),
+				)
+				return
+			}
+		}
+	}
+
+	for group, scopes := range newSupplementalScopeMapsByGroup {
+		tflog.Debug(ctx, "Setting supplemental scope map", map[string]any{
+			"group":  group,
+			"scopes": scopes,
+		})
+		if err := r.client.SetOAuth2SupplementalScopeMap(ctx, plan.Name.ValueString(), group, scopes); err != nil {
+			resp.Diagnostics.AddError(
+				"Error Setting Supplemental Scope Map",
+				"Could not set supplemental scope map: "+err.Error(),
 			)
 			return
 		}

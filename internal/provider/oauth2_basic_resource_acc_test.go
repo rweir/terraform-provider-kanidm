@@ -46,6 +46,11 @@ resource "kanidm_oauth2_basic" "test" {
     group  = kanidm_group.users.id
     scopes = ["openid", "email", "profile"]
   }
+
+  supplemental_scope_map {
+    group  = kanidm_group.users.id
+    scopes = ["ssh_publickeys"]
+  }
 }
 `, groupName, clientName, cb1, cb2),
 				Check: resource.ComposeAggregateTestCheckFunc(
@@ -55,6 +60,7 @@ resource "kanidm_oauth2_basic" "test" {
 					resource.TestCheckResourceAttr("kanidm_oauth2_basic.test", "redirect_uris.#", "2"),
 					resource.TestCheckTypeSetElemAttr("kanidm_oauth2_basic.test", "redirect_uris.*", cb1),
 					resource.TestCheckTypeSetElemAttr("kanidm_oauth2_basic.test", "redirect_uris.*", cb2),
+					resource.TestCheckResourceAttr("kanidm_oauth2_basic.test", "supplemental_scope_map.#", "1"),
 					resource.TestCheckResourceAttrSet("kanidm_oauth2_basic.test", "client_secret"),
 				),
 			},
@@ -76,6 +82,11 @@ resource "kanidm_oauth2_basic" "test" {
   scope_map {
     group  = kanidm_group.users.id
     scopes = ["openid", "email", "profile"]
+  }
+
+  supplemental_scope_map {
+    group  = kanidm_group.users.id
+    scopes = ["ssh_publickeys"]
   }
 }
 `, groupName, clientName, cb1, cb2),
@@ -99,6 +110,11 @@ resource "kanidm_oauth2_basic" "test" {
     group  = kanidm_group.users.id
     scopes = ["openid", "email", "profile"]
   }
+
+  supplemental_scope_map {
+    group  = kanidm_group.users.id
+    scopes = ["ssh_publickeys"]
+  }
 }
 `, groupName, clientName, cb2, cb1),
 				PlanOnly: true,
@@ -120,6 +136,11 @@ resource "kanidm_oauth2_basic" "test" {
   scope_map {
     group  = kanidm_group.users.id
     scopes = ["openid", "email", "profile"]
+  }
+
+  supplemental_scope_map {
+    group  = kanidm_group.users.id
+    scopes = ["ssh_publickeys"]
   }
 }
 `, groupName, clientName, cb1, cb2),

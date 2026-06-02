@@ -13,6 +13,7 @@ type OAuth2Client struct {
 	Origin       string
 	RedirectURIs []string
 	ScopeMaps    map[string][]string
+	SupScopeMaps map[string][]string
 	ClaimMaps    []ClaimMapEntry
 	ClientID     string // Computed
 	ClientSecret string // Only for basic/confidential clients, populated on creation
@@ -79,7 +80,7 @@ func parseClaimMapEntry(s string) (ClaimMapEntry, bool) {
 	return ClaimMapEntry{Name: name, Group: group, Values: values}, true
 }
 
-// parseScopeMapEntry parses one `oauth2_rs_scope_map` line. Format:
+// parseScopeMapEntry parses one OAuth2 scope-map line. Format:
 //
 //	<group>@<domain>: {"scope1", "scope2", ...}
 //
@@ -222,6 +223,13 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 		}
 	}
 
+	supScopeMaps := make(map[string][]string)
+	for _, line := range entry.GetStringSlice("oauth2_rs_sup_scope_map") {
+		if group, scopes, ok := parseScopeMapEntry(line); ok {
+			supScopeMaps[group] = scopes
+		}
+	}
+
 	var claimMaps []ClaimMapEntry
 	for _, line := range entry.GetStringSlice("oauth2_rs_claim_map") {
 		if cm, ok := parseClaimMapEntry(line); ok {
@@ -235,6 +243,7 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 		Origin:       origin,
 		RedirectURIs: entry.GetStringSlice("oauth2_rs_origin"),
 		ScopeMaps:    scopeMaps,
+		SupScopeMaps: supScopeMaps,
 		ClaimMaps:    claimMaps,
 		ClientID:     clientName,
 		IsPublic:     isPublic,
@@ -372,6 +381,28 @@ func (c *Client) DeleteOAuth2ScopeMap(ctx context.Context, rsName, groupName str
 	resp, err := c.doRequest(ctx, "DELETE", fmt.Sprintf("/v1/oauth2/%s/_scopemap/%s", rsName, groupName), nil)
 	if err != nil {
 		return fmt.Errorf("delete oauth2 scope map: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
+// SetOAuth2SupplementalScopeMap sets the supplemental scope mapping for an OAuth2 client.
+func (c *Client) SetOAuth2SupplementalScopeMap(ctx context.Context, rsName, groupName string, scopes []string) error {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/v1/oauth2/%s/_sup_scopemap/%s", rsName, groupName), scopes)
+	if err != nil {
+		return fmt.Errorf("set oauth2 supplemental scope map: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
+// DeleteOAuth2SupplementalScopeMap removes a supplemental scope mapping for an OAuth2 client.
+func (c *Client) DeleteOAuth2SupplementalScopeMap(ctx context.Context, rsName, groupName string) error {
+	resp, err := c.doRequest(ctx, "DELETE", fmt.Sprintf("/v1/oauth2/%s/_sup_scopemap/%s", rsName, groupName), nil)
+	if err != nil {
+		return fmt.Errorf("delete oauth2 supplemental scope map: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

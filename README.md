@@ -115,7 +115,12 @@ resource "kanidm_oauth2_basic" "grafana" {
   scope_map {
     group  = "developers"
     scopes = ["openid", "profile", "email"]
-  ]
+  }
+
+  supplemental_scope_map {
+    group  = "developers"
+    scopes = ["ssh_publickeys"]
+  }
 }
 
 output "grafana_client_secret" {
