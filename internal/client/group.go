@@ -16,6 +16,16 @@ type Group struct {
 	// disabling is not supported by the kanidm API.
 	Posix     bool
 	GidNumber int64
+
+	// AccountPolicy is true when the group has the `account_policy`
+	// class, allowing account-policy attributes to be set on it.
+	AccountPolicy bool
+
+	// AuthSessionExpiry mirrors Kanidm's `authsession_expiry`
+	// account-policy attribute. The Set flag distinguishes absent from
+	// explicitly zero.
+	AuthSessionExpiry    int64
+	AuthSessionExpirySet bool
 }
 
 // CreateGroup creates a new group
@@ -61,10 +71,13 @@ func (c *Client) GetGroup(ctx context.Context, id string) (*Group, error) {
 	}
 
 	posix := false
+	accountPolicy := false
 	for _, cls := range entry.GetStringSlice("class") {
 		if cls == "posixgroup" {
 			posix = true
-			break
+		}
+		if cls == "account_policy" {
+			accountPolicy = true
 		}
 	}
 
@@ -74,13 +87,17 @@ func (c *Client) GetGroup(ctx context.Context, id string) (*Group, error) {
 			gidNumber = v
 		}
 	}
+	authSessionExpiry, authSessionExpirySet := entry.GetInt64("authsession_expiry")
 
 	return &Group{
-		ID:          entry.GetString("name"),
-		Description: entry.GetString("description"),
-		Members:     members,
-		Posix:       posix,
-		GidNumber:   gidNumber,
+		ID:                   entry.GetString("name"),
+		Description:          entry.GetString("description"),
+		Members:              members,
+		Posix:                posix,
+		GidNumber:            gidNumber,
+		AccountPolicy:        accountPolicy,
+		AuthSessionExpiry:    authSessionExpiry,
+		AuthSessionExpirySet: authSessionExpirySet,
 	}, nil
 }
 
@@ -101,6 +118,44 @@ func (c *Client) UpdateGroup(ctx context.Context, id, description string, member
 	resp, err := c.doRequest(ctx, "PATCH", "/v1/group/"+id, req)
 	if err != nil {
 		return fmt.Errorf("update group: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
+// SetGroupAuthSessionExpiry sets the account-policy auth session
+// expiry for a group. Kanidm expects generic attribute values as
+// string arrays.
+func (c *Client) SetGroupAuthSessionExpiry(ctx context.Context, groupID string, expiry int64) error {
+	resp, err := c.doRequest(ctx, "PUT", fmt.Sprintf("/v1/group/%s/_attr/authsession_expiry", groupID), []string{strconv.FormatInt(expiry, 10)})
+	if err != nil {
+		return fmt.Errorf("set group auth session expiry: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
+// EnableGroupAccountPolicy adds the `account_policy` class to a group.
+// Kanidm requires this class before account-policy attrs can be set.
+func (c *Client) EnableGroupAccountPolicy(ctx context.Context, groupID string) error {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/v1/group/%s/_attr/class", groupID), []string{"account_policy"})
+	if err != nil {
+		return fmt.Errorf("enable group account policy: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
+// ResetGroupAuthSessionExpiry removes the group-specific
+// authsession_expiry attribute, letting Kanidm defaults/policy
+// resolution apply.
+func (c *Client) ResetGroupAuthSessionExpiry(ctx context.Context, groupID string) error {
+	resp, err := c.doRequest(ctx, "DELETE", fmt.Sprintf("/v1/group/%s/_attr/authsession_expiry", groupID), nil)
+	if err != nil {
+		return fmt.Errorf("reset group auth session expiry: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

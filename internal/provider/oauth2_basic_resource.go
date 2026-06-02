@@ -29,12 +29,13 @@ type oauth2BasicResource struct {
 }
 
 type oauth2BasicResourceModel struct {
-	Name         types.String `tfsdk:"name"`
-	DisplayName  types.String `tfsdk:"displayname"`
-	Origin       types.String `tfsdk:"origin"`
+	Name                     types.String `tfsdk:"name"`
+	DisplayName              types.String `tfsdk:"displayname"`
+	Origin                   types.String `tfsdk:"origin"`
 	RedirectURIs             types.Set    `tfsdk:"redirect_uris"`
 	ScopeMaps                types.Set    `tfsdk:"scope_map"`
 	ClientSecret             types.String `tfsdk:"client_secret"`
+	RefreshTokenExpiry       types.Int64  `tfsdk:"refresh_token_expiry"`
 	PreferShortUsername      types.Bool   `tfsdk:"prefer_short_username"`
 	AllowInsecureDisablePKCE types.Bool   `tfsdk:"allow_insecure_client_disable_pkce"`
 	JWTLegacyCryptoEnable    types.Bool   `tfsdk:"jwt_legacy_crypto_enable"`
@@ -115,14 +116,22 @@ Store it securely immediately after creation. You can regenerate it using the Ka
 			"redirect_uris": schema.SetAttribute{
 				MarkdownDescription: "Set of allowed redirect URIs for OAuth2 callbacks. " +
 					"Order is not significant — Kanidm stores these as a multi-valued attribute.",
-				Optional:            true,
-				ElementType:         types.StringType,
+				Optional:    true,
+				ElementType: types.StringType,
 			},
 			"client_secret": schema.StringAttribute{
 				MarkdownDescription: "Client secret for the OAuth2 basic client. **Only available during creation.** " +
 					"Store this secret securely as it cannot be retrieved later.",
 				Computed:  true,
 				Sensitive: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
+			"refresh_token_expiry": schema.Int64Attribute{
+				MarkdownDescription: "OAuth2 refresh-token lifetime in seconds. Maps to Kanidm's " +
+					"`oauth2_refresh_token_expiry` attribute. Leave unset to use Kanidm's default.",
+				Optional: true,
 			},
 			"prefer_short_username": schema.BoolAttribute{
 				MarkdownDescription: "If true, Kanidm emits the bare username (`name`) in the `preferred_username` " +
@@ -269,6 +278,10 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 		v := plan.JWTLegacyCryptoEnable.ValueBool()
 		updateOpts.JWTLegacyCryptoEnable = &v
 	}
+	if !plan.RefreshTokenExpiry.IsNull() && !plan.RefreshTokenExpiry.IsUnknown() {
+		v := plan.RefreshTokenExpiry.ValueInt64()
+		updateOpts.RefreshTokenExpiry = &v
+	}
 
 	if err := r.client.UpdateOAuth2Client(ctx, oauth2Client.Name, updateOpts); err != nil {
 		resp.Diagnostics.AddError(
@@ -381,6 +394,10 @@ func (r *oauth2BasicResource) Create(ctx context.Context, req resource.CreateReq
 	if !plan.JWTLegacyCryptoEnable.IsNull() || createdClient.JWTLegacyCryptoEnableSet {
 		plan.JWTLegacyCryptoEnable = types.BoolValue(createdClient.JWTLegacyCryptoEnable)
 	}
+	// Same null-preservation for refresh_token_expiry.
+	if !plan.RefreshTokenExpiry.IsNull() || createdClient.RefreshTokenExpirySet {
+		plan.RefreshTokenExpiry = types.Int64Value(createdClient.RefreshTokenExpiry)
+	}
 
 	// Keep the scope maps from the plan (can't read them back from API in current form)
 	// In a future enhancement, we could parse the scope maps from the API response
@@ -450,6 +467,10 @@ func (r *oauth2BasicResource) Read(ctx context.Context, req resource.ReadRequest
 	// Same null-preservation for jwt_legacy_crypto_enable.
 	if !state.JWTLegacyCryptoEnable.IsNull() || oauth2Client.JWTLegacyCryptoEnableSet {
 		state.JWTLegacyCryptoEnable = types.BoolValue(oauth2Client.JWTLegacyCryptoEnable)
+	}
+	// Same null-preservation for refresh_token_expiry.
+	if !state.RefreshTokenExpiry.IsNull() || oauth2Client.RefreshTokenExpirySet {
+		state.RefreshTokenExpiry = types.Int64Value(oauth2Client.RefreshTokenExpiry)
 	}
 
 	if len(oauth2Client.RedirectURIs) > 0 {
@@ -586,6 +607,10 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 		v := false
 		updateOpts.JWTLegacyCryptoEnable = &v
 	}
+	if !plan.RefreshTokenExpiry.IsNull() && !plan.RefreshTokenExpiry.IsUnknown() {
+		v := plan.RefreshTokenExpiry.ValueInt64()
+		updateOpts.RefreshTokenExpiry = &v
+	}
 
 	if err := r.client.UpdateOAuth2Client(ctx, plan.Name.ValueString(), updateOpts); err != nil {
 		resp.Diagnostics.AddError(
@@ -593,6 +618,15 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 			"Could not update OAuth2 basic client: "+err.Error(),
 		)
 		return
+	}
+	if plan.RefreshTokenExpiry.IsNull() && !state.RefreshTokenExpiry.IsNull() {
+		if err := r.client.ResetOAuth2RefreshTokenExpiry(ctx, plan.Name.ValueString()); err != nil {
+			resp.Diagnostics.AddError(
+				"Error Resetting OAuth2 Refresh Token Expiry",
+				"Could not reset OAuth2 refresh token expiry: "+err.Error(),
+			)
+			return
+		}
 	}
 
 	// Handle scope map changes
@@ -732,6 +766,7 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 	plan.Name = types.StringValue(updatedClient.Name)
 	plan.DisplayName = types.StringValue(updatedClient.DisplayName)
 	plan.Origin = types.StringValue(updatedClient.Origin)
+	plan.ClientSecret = state.ClientSecret
 
 	if len(updatedClient.RedirectURIs) > 0 {
 		redirectURIsSet, diags := types.SetValueFrom(ctx, types.StringType, updatedClient.RedirectURIs)
@@ -756,6 +791,10 @@ func (r *oauth2BasicResource) Update(ctx context.Context, req resource.UpdateReq
 	// Same for jwt_legacy_crypto_enable.
 	if !plan.JWTLegacyCryptoEnable.IsNull() || updatedClient.JWTLegacyCryptoEnableSet {
 		plan.JWTLegacyCryptoEnable = types.BoolValue(updatedClient.JWTLegacyCryptoEnable)
+	}
+	// Same for refresh_token_expiry.
+	if !plan.RefreshTokenExpiry.IsNull() || updatedClient.RefreshTokenExpirySet {
+		plan.RefreshTokenExpiry = types.Int64Value(updatedClient.RefreshTokenExpiry)
 	}
 
 	// Preserve client secret from state (cannot be read back from API)

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -180,6 +181,20 @@ func (e *Entry) GetBool(key string) (value bool, present bool) {
 		return false, false
 	}
 	return s == "true", true
+}
+
+// GetInt64 retrieves an integer attribute. Kanidm commonly encodes
+// single-valued numeric attrs as single-element string arrays.
+func (e *Entry) GetInt64(key string) (value int64, present bool) {
+	s := e.GetString(key)
+	if s == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 // GetStringSlice retrieves a string slice attribute

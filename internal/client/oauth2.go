@@ -18,6 +18,12 @@ type OAuth2Client struct {
 	ClientSecret string // Only for basic/confidential clients, populated on creation
 	IsPublic     bool
 
+	// RefreshTokenExpiry mirrors Kanidm's
+	// `oauth2_refresh_token_expiry` attribute. The Set flag
+	// distinguishes absent from explicitly zero.
+	RefreshTokenExpiry    int64
+	RefreshTokenExpirySet bool
+
 	// PreferShortUsername mirrors Kanidm's
 	// `oauth2_prefer_short_username` attribute. The bool itself only
 	// matters when PreferShortUsernameSet is true — see GetOAuth2Client.
@@ -207,6 +213,7 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 	preferShort, preferShortSet := entry.GetBool("oauth2_prefer_short_username")
 	disablePKCE, disablePKCESet := entry.GetBool("oauth2_allow_insecure_client_disable_pkce")
 	jwtLegacy, jwtLegacySet := entry.GetBool("oauth2_jwt_legacy_crypto_enable")
+	refreshTokenExpiry, refreshTokenExpirySet := entry.GetInt64("oauth2_refresh_token_expiry")
 
 	scopeMaps := make(map[string][]string)
 	for _, line := range entry.GetStringSlice("oauth2_rs_scope_map") {
@@ -232,6 +239,9 @@ func (c *Client) GetOAuth2Client(ctx context.Context, name string) (*OAuth2Clien
 		ClientID:     clientName,
 		IsPublic:     isPublic,
 
+		RefreshTokenExpiry:    refreshTokenExpiry,
+		RefreshTokenExpirySet: refreshTokenExpirySet,
+
 		PreferShortUsername:    preferShort,
 		PreferShortUsernameSet: preferShortSet,
 
@@ -256,6 +266,7 @@ type UpdateOAuth2ClientOpts struct {
 	PreferShortUsername      *bool
 	AllowInsecureDisablePKCE *bool
 	JWTLegacyCryptoEnable    *bool
+	RefreshTokenExpiry       *int64
 }
 
 // UpdateOAuth2Client PATCHes the named OAuth2 client. Only attributes
@@ -305,11 +316,28 @@ func (c *Client) UpdateOAuth2Client(ctx context.Context, name string, opts Updat
 		attrs["oauth2_jwt_legacy_crypto_enable"] = []string{val}
 	}
 
+	if opts.RefreshTokenExpiry != nil {
+		attrs["oauth2_refresh_token_expiry"] = []string{fmt.Sprintf("%d", *opts.RefreshTokenExpiry)}
+	}
+
 	req := NewUpdateRequest(attrs)
 
 	resp, err := c.doRequest(ctx, "PATCH", "/v1/oauth2/"+name, req)
 	if err != nil {
 		return fmt.Errorf("update oauth2 client: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
+// ResetOAuth2RefreshTokenExpiry removes the explicit refresh-token
+// expiry from an OAuth2 resource server, letting Kanidm's default
+// apply.
+func (c *Client) ResetOAuth2RefreshTokenExpiry(ctx context.Context, name string) error {
+	resp, err := c.doRequest(ctx, "DELETE", fmt.Sprintf("/v1/oauth2/%s/_attr/oauth2_refresh_token_expiry", name), nil)
+	if err != nil {
+		return fmt.Errorf("reset oauth2 refresh token expiry: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
